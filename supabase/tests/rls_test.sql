@@ -82,6 +82,11 @@ declare
   ok           boolean;
   shift_ccm    uuid;
   ts_id        uuid;
+  team_mgmt    uuid := '00000000-0000-4000-8000-000000000020';
+  rival_org    uuid := '99999999-0000-4000-8000-000000000001';
+  rival_user   uuid := '99999999-0000-4000-8000-000000000002';
+  rival_ts     uuid := '11111111-0000-4000-8000-000000000001';
+  mgr_ts       uuid := '11111111-0000-4000-8000-000000000002';
 begin
   -- ==============================================================
   -- Fixtures created as the harness (service context)
@@ -375,6 +380,159 @@ begin
   perform rls_harness.record_check('archiving', 'archived staff',
     'loses access to shifts immediately', n = 0);
   update profiles set archived_at = null where id = u_staff1;
+
+
+  -- ==============================================================
+  -- HARDENING (migration 0005) — each of these was a CONFIRMED hole
+  -- ==============================================================
+
+  -- Forging audit entries via the SECURITY DEFINER RPC.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    perform write_audit_log(org_id, null, 'FORGED', 'forgery', null, null, null);
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('audit_logs', 'staff',
+    'cannot forge entries via write_audit_log RPC', ok);
+
+  -- Administrator demoting the owner by UPDATE (not just DELETE).
+  perform rls_harness.act_as_harness();
+  insert into user_roles (organisation_id, user_id, role)
+  values (org_id, u_manager, 'administrator') on conflict do nothing;
+  perform rls_harness.act_as(u_manager);
+  begin
+    update user_roles set role = 'staff'
+      where user_id = u_owner and role = 'owner';
+    get diagnostics n = row_count;
+    ok := (n = 0);
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  select count(*) into n from user_roles where user_id = u_owner and role = 'owner';
+  perform rls_harness.record_check('user_roles', 'administrator',
+    'cannot strip the owner role by UPDATE', ok and n = 1);
+  delete from user_roles where user_id = u_manager and role = 'administrator';
+
+  -- Manager reading pay rates outside their assigned properties.
+  perform rls_harness.act_as_harness();
+  delete from user_property_access
+    where user_id = u_manager and property_id = lodge_id;
+  perform rls_harness.act_as(u_manager);
+  select count(*) into n from employment_details where user_id = u_staff3;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('employment_details', 'manager (Coastal only)',
+    'cannot read pay rates for staff at another property', n = 0);
+
+  perform rls_harness.act_as(u_manager);
+  select count(*) into n from emergency_contacts where user_id = u_staff3;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('emergency_contacts', 'manager (Coastal only)',
+    'cannot read emergency contacts for another property', n = 0);
+  insert into user_property_access (organisation_id, user_id, property_id)
+    values (org_id, u_manager, lodge_id) on conflict do nothing;
+
+  -- Staff relocating their own timesheet to another organisation.
+  perform rls_harness.act_as_harness();
+  insert into organisations (id, name) values (rival_org, 'Rival Motels')
+    on conflict (id) do nothing;
+  insert into timesheets (id, organisation_id, property_id, user_id, work_date, status)
+  values (rival_ts, org_id, coastal_id, u_staff1, current_date - 3, 'draft')
+    on conflict (id) do nothing;
+  perform rls_harness.act_as(u_staff1);
+  begin
+    update timesheets set organisation_id = rival_org where id = rival_ts;
+    get diagnostics n = row_count;
+    ok := (n = 0);
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  select count(*) into n from timesheets
+    where id = rival_ts and organisation_id = org_id;
+  perform rls_harness.record_check('timesheets', 'staff',
+    'cannot move their timesheet to another organisation', ok and n = 1);
+
+  -- Staff self-joining a team to inherit its access.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    update profiles set team_id = team_mgmt where id = u_staff1;
+    get diagnostics n = row_count;
+    ok := (n = 0);
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  select count(*) into n from profiles where id = u_staff1 and team_id = team_mgmt;
+  perform rls_harness.record_check('profiles', 'staff',
+    'cannot change their own team', ok and n = 0);
+
+  -- Staff may still update the two fields that ARE theirs.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    update profiles set preferred_name = 'Ro', mobile_number = '0400 555 666'
+      where id = u_staff1;
+    get diagnostics n = row_count;
+    ok := (n = 1);
+  exception when others then
+    ok := false;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('profiles', 'staff',
+    'can still update preferred name and mobile', ok);
+
+  -- Cross-tenant role injection.
+  perform rls_harness.act_as_harness();
+  insert into user_roles (organisation_id, user_id, role)
+    values (org_id, u_manager, 'administrator') on conflict do nothing;
+  perform rls_harness.act_as(u_manager);
+  begin
+    insert into user_roles (organisation_id, user_id, role)
+    values (org_id, rival_user, 'administrator');
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('user_roles', 'administrator',
+    'cannot grant a role to a user in another organisation', ok);
+  delete from user_roles where user_id = u_manager and role = 'administrator';
+
+  -- Manager approving their own timesheet.
+  perform rls_harness.act_as_harness();
+  insert into timesheets (id, organisation_id, property_id, user_id, work_date, status)
+  values (mgr_ts, org_id, coastal_id, u_manager, current_date - 1, 'submitted')
+    on conflict (id) do nothing;
+  perform rls_harness.act_as(u_manager);
+  begin
+    update timesheets set status = 'approved', approved_by = u_manager,
+                          approved_at = now()
+      where id = mgr_ts;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('timesheets', 'manager',
+    'cannot approve their own timesheet', ok);
+
+  -- Editing a locked timesheet.
+  perform rls_harness.act_as_harness();
+  update timesheets set status = 'exported', locked_at = now() where id = mgr_ts;
+  perform rls_harness.act_as(u_manager);
+  begin
+    update timesheets set paid_hours = 99 where id = mgr_ts;
+    get diagnostics n = row_count;
+    ok := (n = 0);
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('timesheets', 'manager',
+    'cannot edit a LOCKED timesheet', ok);
 
   -- ==============================================================
   -- ANONYMOUS ACCESS

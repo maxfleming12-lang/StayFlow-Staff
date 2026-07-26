@@ -91,15 +91,25 @@ function.
 ### RLS filters rows; triggers guard columns
 
 RLS decides *which rows* a statement may touch — it cannot say "you may
-update this row but not that column". Four trigger guards cover the gap:
+update this row but not that column". Trigger guards cover the gap:
 
 | Guard | Prevents |
 | --- | --- |
-| `guard_profile_self_update` | Staff changing their own `is_active`, `archived_at`, organisation or primary property |
-| `guard_role_change` | Anyone editing their own roles; administrators minting or removing an owner |
-| `guard_timesheet_staff_update` | Staff rewriting hours, breaks, status or approval fields |
+| `guard_profile_self_update` | Staff changing anything on their own profile except preferred name and mobile number |
+| `guard_role_change` | Anyone editing their own roles; anyone but an owner granting, removing **or demoting** an owner |
+| `guard_role_tenancy` | Granting a role to a user in another organisation |
+| `guard_property_access_tenancy` | Granting access to a property in another organisation |
+| `guard_timesheet_staff_update` | Staff changing anything on their own timesheet except their note and acknowledgement |
+| `guard_timesheet_management` | Managers approving their own timesheet, stamping someone else's `approved_by`, editing locked rows, or regressing an exported timesheet |
 | `guard_task_verification` | Staff marking their own work verified |
+| `guard_task_relocation` | Staff moving a task to another property or organisation |
 | `guard_open_shift_approval` | Staff approving their own shift claim |
+
+The two self-update guards are **allow-lists**, not deny-lists: the new row
+must equal the old row with only the permitted fields substituted. Both began
+as deny-lists and both leaked — a column the list forgot stayed writable. An
+allow-list protects columns added in future migrations without anyone
+remembering to.
 
 Each guard exits early when `is_service_context()` is true — that is, when
 there is no end-user JWT, meaning trusted server-side code. A browser always
@@ -119,7 +129,9 @@ the API by anyone. Corrections happen on the timesheet, with a reason and an
 audit entry, leaving the original events intact.
 
 `audit_logs` also has no INSERT policy: entries are written exclusively by
-`SECURITY DEFINER` triggers, so a client can neither forge nor suppress them.
+`SECURITY DEFINER` triggers. Note that this alone was **not** sufficient —
+`write_audit_log()` was reachable as a PostgREST RPC until its EXECUTE grant
+was revoked. See the adversarial audit below.
 
 ### Confidential employment data is a separate table
 
@@ -184,6 +196,63 @@ immediate, loud failure.
 
 `anon` is granted nothing on any application table.
 
+
+---
+
+## Adversarial audit
+
+After the schema was written and the first 27 tests passed, four independent
+reviewers were run against the live database with distinct lenses (privilege
+escalation, cross-tenant leakage, confidential-data exposure, immutability).
+They were instructed to demonstrate every claim with an executed query rather
+than reason about the SQL.
+
+They produced 36 findings. **The automated verification stage did not run** —
+it failed on an account spend limit — so the findings were triaged and
+verified by hand instead. Nine were confirmed by re-executing the attack:
+
+| # | Severity | Confirmed hole | Evidence before fix |
+| --- | --- | --- | --- |
+| 1 | Critical | `write_audit_log()` is `SECURITY DEFINER` and was left with default PUBLIC EXECUTE, and PostgREST exposes public functions as RPC. Any staff member — or `anon` — could forge audit entries. `audit_logs` having no INSERT policy achieved nothing. | staff inserted a forged row |
+| 2 | Critical | `guard_role_change()` only tested `tg_op = 'DELETE'`, so an administrator could demote the owner with an UPDATE. The owner test also used `coalesce(new.role, old.role)`, which returns the *new* role, so a demotion never examined the old one. | owner rows remaining: 0 |
+| 3 | Critical | `user_roles` / `user_property_access` write policies checked only the row's own `organisation_id`. Nothing tied the target user or property to that organisation, permitting cross-tenant injection. | confirmed by inspection, now blocked |
+| 4 | High | `employment_select_management` and `emergency_select_management` granted any manager organisation-wide access. A Coastal-only manager could read Holiday Lodge pay rates and next-of-kin details, breaking "managers access only their assigned properties". | 2 pay rates exposed |
+| 5 | High | `guard_timesheet_staff_update()` enumerated columns as a deny-list, so anything unlisted stayed writable. A staff member could move their own timesheet into another organisation, hiding it from their management chain. | timesheet relocated |
+| 6 | High | `guard_profile_self_update()` did not cover `team_id`. A staff member could self-join the Management team and inherit its task visibility. | team changed |
+| 7 | High | `shifts_select_open` and the open-shift offer policies had no organisation predicate, relying on `can_access_property()` alone. | cross-org readability |
+| 8 | High | `tasks_update_assigned` had a `WITH CHECK` far weaker than its `USING`, letting assigned staff re-point a task at an inaccessible property. | confirmed by inspection |
+| 9 | High | Managers could approve their own timesheet, stamp `approved_by` with another user's id, edit locked rows, and walk an exported timesheet back to draft. | confirmed by inspection |
+
+Migration `0005_security_hardening.sql` closes all nine. Two structural
+lessons drove the fixes:
+
+**Deny-lists rot.** Both column guards enumerated what staff *may not*
+change, so every column added later was writable by default. They are now
+allow-lists: the new row must equal the old row with only the permitted
+fields substituted. A column added in a future migration is protected
+without anyone remembering to protect it.
+
+**`SECURITY DEFINER` plus default grants is a hole, not a helper.** A definer
+function bypasses RLS by design; leaving PUBLIC EXECUTE on it hands that
+bypass to every client. `write_audit_log()` and all trigger functions now
+have EXECUTE revoked from `public`, `anon` and `authenticated`.
+
+The read-only predicate helpers (`active_uid`, `has_role_at_least`,
+`can_access_property`, `current_organisation_id`, `manages_user`,
+`manages_property`, `shares_organisation`) deliberately **keep** EXECUTE.
+Policy expressions are evaluated with the invoking user's privileges, so
+revoking them makes every policy raise "permission denied" rather than
+filter — verified experimentally. They are safe to expose because each only
+reveals facts about the caller themselves.
+
+### What the audit did NOT establish
+
+- 26 of the 36 findings remain **unreviewed**, not refuted. The lower-severity
+  ones were not triaged.
+- One of the five reviewers (coverage/correctness) died before returning, so
+  that lens was never applied.
+- No independent penetration test has been performed.
+
 ---
 
 ## Test results
@@ -194,7 +263,7 @@ Run against a fresh local stack:
 npm run db:test
 ```
 
-All 27 checks pass. Each impersonates a real seeded user by setting the
+All 37 checks pass. Each impersonates a real seeded user by setting the
 `authenticated` role and the JWT claims Supabase derives `auth.uid()` from —
 the same path a real request takes, so these exercise the actual policies
 rather than a mock.
@@ -228,9 +297,20 @@ rather than a mock.
 | 25 | archiving | archived staff | loses access to shifts immediately | PASS |
 | 26 | anon | unauthenticated | cannot read staff profiles | PASS |
 | 27 | anon | unauthenticated | cannot read shifts | PASS |
+| 28 | audit_logs | staff | cannot forge entries via `write_audit_log` RPC | PASS |
+| 29 | user_roles | administrator | cannot strip the owner role by UPDATE | PASS |
+| 30 | employment_details | manager (Coastal only) | cannot read pay rates for another property | PASS |
+| 31 | emergency_contacts | manager (Coastal only) | cannot read emergency contacts for another property | PASS |
+| 32 | timesheets | staff | cannot move their timesheet to another organisation | PASS |
+| 33 | profiles | staff | cannot change their own team | PASS |
+| 34 | profiles | staff | can still update preferred name and mobile | PASS |
+| 35 | user_roles | administrator | cannot grant a role to a user in another organisation | PASS |
+| 36 | timesheets | manager | cannot approve their own timesheet | PASS |
+| 37 | timesheets | manager | cannot edit a LOCKED timesheet | PASS |
 
 Checks 23–25 failed on first run and drove the `active_uid()` change described
-above.
+above. Checks 28–37 correspond to the nine holes found by the adversarial
+audit; each was demonstrated working before the fix and rejected after it.
 
 The test harness is created in a throwaway `rls_harness` schema and dropped at
 the end of the run. This matters: `act_as()` sets JWT claims, and leaving it in
@@ -270,7 +350,9 @@ These are not yet implemented and must not be assumed:
 - **Session expiry policy.** Supabase defaults are in force; no explicit
   idle-timeout has been configured.
 - **Penetration testing.** None performed. The evidence above is
-  self-testing, not an independent assessment.
+  self-testing plus one adversarial review round, not an independent
+  assessment.
+- **26 audit findings are untriaged.** See "What the audit did NOT establish".
 
 Labour hours and costs anywhere in StayFlow are **estimates for planning
 only**. They are not award-interpreted payroll and must not be relied on for
