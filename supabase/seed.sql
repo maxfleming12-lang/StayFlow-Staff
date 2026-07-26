@@ -104,14 +104,22 @@ begin
       instance_id, id, aud, role, email,
       encrypted_password, email_confirmed_at,
       raw_app_meta_data, raw_user_meta_data,
-      created_at, updated_at
+      created_at, updated_at,
+      -- GoTrue scans these into non-nullable strings. Leaving them NULL
+      -- makes every sign-in fail with "Database error querying schema",
+      -- which is the price of inserting into auth.users directly.
+      confirmation_token, recovery_token,
+      email_change_token_new, email_change,
+      email_change_token_current, phone_change, phone_change_token,
+      reauthentication_token
     )
     values (
       '00000000-0000-0000-0000-000000000000',
       (entry->>'id')::uuid, 'authenticated', 'authenticated', entry->>'email',
       crypt(demo_password, gen_salt('bf')), now(),
       '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb,
-      now(), now()
+      now(), now(),
+      '', '', '', '', '', '', '', ''
     )
     on conflict (id) do nothing;
 
