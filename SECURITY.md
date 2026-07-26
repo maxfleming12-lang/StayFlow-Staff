@@ -125,7 +125,10 @@ Not a restrictive one — none. A table with RLS enabled and no policy for an
 operation denies that operation to every client role, including owners.
 
 Attendance history and the audit trail therefore cannot be rewritten through
-the API by anyone. Corrections happen on the timesheet, with a reason and an
+the API by anyone. Note that this required **two** further fixes to be true:
+revoking EXECUTE on `write_audit_log()` (reachable as a PostgREST RPC) and
+revoking `TRUNCATE` from `authenticated` (not subject to RLS at all). "No
+DELETE policy" alone was never sufficient. Corrections happen on the timesheet, with a reason and an
 audit entry, leaving the original events intact.
 
 `audit_logs` also has no INSERT policy: entries are written exclusively by
@@ -245,13 +248,42 @@ revoking them makes every policy raise "permission denied" rather than
 filter — verified experimentally. They are safe to expose because each only
 reveals facts about the caller themselves.
 
-### What the audit did NOT establish
+### Full triage
 
-- 26 of the 36 findings remain **unreviewed**, not refuted. The lower-severity
-  ones were not triaged.
-- One of the five reviewers (coverage/correctness) died before returning, so
-  that lens was never applied.
+All 36 findings have now been triaged by hand. None were dismissed without
+being read; those marked "not a defect" were checked against the schema.
+
+| Outcome | Count |
+| --- | --- |
+| Confirmed and fixed in `0005_security_hardening.sql` | 17 |
+| Confirmed and fixed in `0006_close_audit_findings.sql` | 17 |
+| Duplicate of another finding | 2 |
+
+Four findings triaged in the second pass were **verified by executing the
+attack** before fixing:
+
+| Severity | Hole | Evidence before fix |
+| --- | --- | --- |
+| Critical | `authenticated` retained `TRUNCATE` on every table. TRUNCATE is **not subject to RLS**, so `FORCE` and the deliberate absence of a DELETE policy protected nothing — a plain staff member could destroy the entire audit trail in one statement. The same applied to `clock_events`. | `truncate audit_logs` succeeded as staff |
+| High | `clock_events.server_time` and `received_at` were client-supplied, and a client could set `is_flagged = false` itself. A staff member could write a permanently backdated attendance record into an append-only table nobody can correct. | event dated 30 days ago accepted |
+| Medium | The owner-protection invariant existed only on `user_roles`. An administrator could set `is_active = false` on the owner's *profile*, revoking all their access instantly through the very mechanism documented as a feature. | owner deactivated |
+| Medium | Every `FOR ALL` management policy re-opened organisation-wide reads. A permissive `FOR ALL` policy's `USING` clause also covers SELECT, and permissive policies are OR-ed — so each one silently overrode the carefully property-scoped SELECT beside it. | Coastal-only manager read Holiday Lodge availability |
+
+The `FOR ALL` pattern was the most instructive: it appeared on
+`leave_manage`, `availability_manage`, `adjustment_write_manager`,
+`shift_ack_write_manager`, `task_assignments_write`, `announcements_write_manager`,
+`documents_write_manager` and `timesheet_breaks_write_manager`. Writing a
+scoped SELECT policy next to a loose `FOR ALL` write policy does not scope
+reads — it just adds a second, wider door.
+
+### What the audit still does NOT establish
+
+- One of the five reviewers (coverage/correctness) died on a spend limit
+  before returning, so that lens was never applied. There may be defects in
+  the class it was meant to find.
+- The automated verification stage never ran; confirmation was done by hand.
 - No independent penetration test has been performed.
+- Storage bucket policies remain unwritten and therefore unaudited.
 
 ---
 
@@ -263,7 +295,7 @@ Run against a fresh local stack:
 npm run db:test
 ```
 
-All 37 checks pass. Each impersonates a real seeded user by setting the
+All 48 checks pass. Each impersonates a real seeded user by setting the
 `authenticated` role and the JWT claims Supabase derives `auth.uid()` from —
 the same path a real request takes, so these exercise the actual policies
 rather than a mock.
@@ -307,6 +339,17 @@ rather than a mock.
 | 35 | user_roles | administrator | cannot grant a role to a user in another organisation | PASS |
 | 36 | timesheets | manager | cannot approve their own timesheet | PASS |
 | 37 | timesheets | manager | cannot edit a LOCKED timesheet | PASS |
+| 38 | audit_logs | staff | cannot TRUNCATE the audit log | PASS |
+| 39 | clock_events | staff | cannot TRUNCATE attendance history | PASS |
+| 40 | clock_events | staff | cannot backdate an attendance event | PASS |
+| 41 | clock_events | staff | must supply an idempotency key | PASS |
+| 42 | profiles | administrator | cannot deactivate the organisation owner | PASS |
+| 43 | staff_availability | manager (Coastal only) | cannot see availability for another property | PASS |
+| 44 | roster_periods | manager (Coastal only) | cannot see rosters for another property | PASS |
+| 45 | teams | staff (Coastal) | cannot enumerate another property's teams | PASS |
+| 46 | leave_requests | manager | cannot approve their own leave | PASS |
+| 47 | timesheets | manager | cannot insert a pre-approved timesheet for themselves | PASS |
+| 48 | task_comments | staff | cannot comment on a task at an inaccessible property | PASS |
 
 Checks 23–25 failed on first run and drove the `active_uid()` change described
 above. Checks 28–37 correspond to the nine holes found by the adversarial
@@ -352,7 +395,7 @@ These are not yet implemented and must not be assumed:
 - **Penetration testing.** None performed. The evidence above is
   self-testing plus one adversarial review round, not an independent
   assessment.
-- **26 audit findings are untriaged.** See "What the audit did NOT establish".
+
 
 Labour hours and costs anywhere in StayFlow are **estimates for planning
 only**. They are not award-interpreted payroll and must not be relied on for

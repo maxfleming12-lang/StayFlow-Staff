@@ -4,11 +4,7 @@
  * GENERATED FILE — do not edit by hand.
  *
  * Regenerate after any migration change:
- *   supabase db reset            # apply migrations locally
- *   supabase gen types typescript --local > src/types/database.ts
- *
- * Against a linked remote project instead:
- *   supabase gen types typescript --linked > src/types/database.ts
+ *   npm run db:types
  */
 
 export type Json =

@@ -87,6 +87,9 @@ declare
   rival_user   uuid := '99999999-0000-4000-8000-000000000002';
   rival_ts     uuid := '11111111-0000-4000-8000-000000000001';
   mgr_ts       uuid := '11111111-0000-4000-8000-000000000002';
+  mgr_leave    uuid := '11111111-0000-4000-8000-000000000003';
+  lodge_team   uuid := '11111111-0000-4000-8000-000000000004';
+  lodge_task   uuid := '11111111-0000-4000-8000-000000000005';
 begin
   -- ==============================================================
   -- Fixtures created as the harness (service context)
@@ -533,6 +536,169 @@ begin
   perform rls_harness.act_as_harness();
   perform rls_harness.record_check('timesheets', 'manager',
     'cannot edit a LOCKED timesheet', ok);
+
+
+  -- ==============================================================
+  -- REMAINING AUDIT FINDINGS (migration 0006)
+  -- ==============================================================
+
+  -- TRUNCATE bypasses RLS entirely; it was the real hole in
+  -- "audit_logs is append-only".
+  perform rls_harness.act_as(u_staff1);
+  begin
+    truncate audit_logs;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('audit_logs', 'staff',
+    'cannot TRUNCATE the audit log', ok);
+
+  perform rls_harness.act_as(u_staff1);
+  begin
+    truncate clock_events;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('clock_events', 'staff',
+    'cannot TRUNCATE attendance history', ok);
+
+  -- The server owns the server clock.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    insert into clock_events (organisation_id, property_id, user_id, event_type,
+                              server_time, was_offline, is_flagged, idempotency_key)
+    values (org_id, coastal_id, u_staff1, 'clock_in',
+            now() - interval '30 days', false, false, 'test-backdate-1');
+    ok := true;
+  exception when others then
+    ok := false;
+  end;
+  perform rls_harness.act_as_harness();
+  select count(*) into n from clock_events
+    where idempotency_key = 'test-backdate-1'
+      and server_time < now() - interval '1 day';
+  perform rls_harness.record_check('clock_events', 'staff',
+    'cannot backdate an attendance event', n = 0);
+
+  -- A client must supply an idempotency key, so replayed offline events
+  -- cannot silently duplicate.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    insert into clock_events (organisation_id, property_id, user_id, event_type)
+    values (org_id, coastal_id, u_staff1, 'clock_in');
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('clock_events', 'staff',
+    'must supply an idempotency key', ok);
+
+  -- The organisation owner cannot be locked out by an administrator.
+  perform rls_harness.act_as_harness();
+  insert into user_roles (organisation_id, user_id, role)
+  values (org_id, u_manager, 'administrator') on conflict do nothing;
+  perform rls_harness.act_as(u_manager);
+  begin
+    update profiles set is_active = false where id = u_owner;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  select count(*) into n from profiles where id = u_owner and is_active;
+  perform rls_harness.record_check('profiles', 'administrator',
+    'cannot deactivate the organisation owner', ok and n = 1);
+  delete from user_roles where user_id = u_manager and role = 'administrator';
+
+  -- FOR ALL management policies no longer re-open organisation-wide reads.
+  perform rls_harness.act_as_harness();
+  delete from user_property_access
+    where user_id = u_manager and property_id = lodge_id;
+  insert into staff_availability (organisation_id, user_id, day_of_week,
+                                  is_available, status)
+  values (org_id, u_staff3, 1, false, 'pending');
+  perform rls_harness.act_as(u_manager);
+  select count(*) into n from staff_availability where user_id = u_staff3;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('staff_availability', 'manager (Coastal only)',
+    'cannot see availability for another property', n = 0);
+
+  perform rls_harness.act_as_harness();
+  insert into roster_periods (organisation_id, property_id, week_start_date)
+  values (org_id, lodge_id, current_date) on conflict do nothing;
+  perform rls_harness.act_as(u_manager);
+  select count(*) into n from roster_periods where property_id = lodge_id;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('roster_periods', 'manager (Coastal only)',
+    'cannot see rosters for another property', n = 0);
+  insert into user_property_access (organisation_id, user_id, property_id)
+    values (org_id, u_manager, lodge_id) on conflict do nothing;
+
+  -- Teams scoped to one property are not enumerable organisation-wide.
+  perform rls_harness.act_as_harness();
+  insert into teams (id, organisation_id, property_id, name)
+  values (lodge_team, org_id, lodge_id, 'Lodge Night Crew')
+  on conflict (id) do nothing;
+  perform rls_harness.act_as(u_staff1);   -- Coastal only
+  select count(*) into n from teams where id = lodge_team;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('teams', 'staff (Coastal)',
+    'cannot enumerate another property''s teams', n = 0);
+
+  -- Self-approval of leave.
+  perform rls_harness.act_as_harness();
+  insert into leave_requests (id, organisation_id, user_id, category,
+                              first_date, last_date, status)
+  values (mgr_leave, org_id, u_manager, 'annual',
+          current_date + 10, current_date + 12, 'pending')
+  on conflict (id) do nothing;
+  perform rls_harness.act_as(u_manager);
+  begin
+    update leave_requests set status = 'approved' where id = mgr_leave;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('leave_requests', 'manager',
+    'cannot approve their own leave', ok);
+
+  -- A manager cannot INSERT a timesheet that is already approved.
+  perform rls_harness.act_as(u_manager);
+  begin
+    insert into timesheets (organisation_id, property_id, user_id, work_date,
+                            status, approved_by, approved_at)
+    values (org_id, coastal_id, u_manager, current_date - 20,
+            'approved', u_manager, now());
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('timesheets', 'manager',
+    'cannot insert a pre-approved timesheet for themselves', ok);
+
+  -- Comments on tasks the author cannot see.
+  perform rls_harness.act_as_harness();
+  insert into tasks (id, organisation_id, property_id, title)
+  values (lodge_task, org_id, lodge_id, 'Lodge boiler check')
+  on conflict (id) do nothing;
+  perform rls_harness.act_as(u_staff1);   -- Coastal only, unassigned
+  begin
+    insert into task_comments (organisation_id, task_id, user_id, body)
+    values (org_id, lodge_task, u_staff1, 'injected');
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('task_comments', 'staff',
+    'cannot comment on a task at an inaccessible property', ok);
 
   -- ==============================================================
   -- ANONYMOUS ACCESS
