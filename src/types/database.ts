@@ -4,7 +4,8 @@
  * GENERATED FILE — do not edit by hand.
  *
  * Regenerate after any migration change:
- *   npm run db:types
+ *   npm run db:types            # from the local stack
+ *   npm run db:types -- --linked  # from the linked remote project
  */
 
 export type Json =

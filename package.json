@@ -11,8 +11,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:reset": "supabase db reset",
-    "db:test": "supabase db reset && docker exec -i supabase_db_stayflow-staff psql -U postgres -d postgres -q < supabase/tests/rls_test.sql",
-    "db:types": "supabase gen types typescript --local > src/types/database.ts"
+    "db:test": "bash scripts/db-test.sh",
+    "db:types": "bash scripts/db-types.sh",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",
@@ -39,6 +41,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "jsdom": "^29.1.1",
+    "supabase": "^2.109.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"

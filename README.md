@@ -179,7 +179,12 @@ npm test
 npm run build
 ```
 
-Database (requires Docker running):
+Database (requires Docker running). The Supabase CLI is a devDependency, so
+no global install is needed:
+
+```bash
+npm run db:start
+```
 
 ```bash
 npm run db:reset
