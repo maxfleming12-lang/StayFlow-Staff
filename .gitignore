@@ -46,3 +46,7 @@ next-env.d.ts
 
 # The example file is documentation and must be committed.
 !.env.example
+
+# Supabase local stack
+supabase/.branches
+supabase/.temp

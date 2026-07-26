@@ -9,7 +9,10 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:reset": "supabase db reset",
+    "db:test": "supabase db reset && docker exec -i supabase_db_stayflow-staff psql -U postgres -d postgres -q < supabase/tests/rls_test.sql",
+    "db:types": "supabase gen types typescript --local > src/types/database.ts"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",

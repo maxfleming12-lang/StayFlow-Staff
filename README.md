@@ -21,14 +21,25 @@ use it like a native app, including offline fallback and push notifications.
 
 - Real Supabase email/password authentication with password reset
 - Five-role model (Owner, Administrator, Manager, Supervisor, Staff)
-- Row Level Security enabled and forced on every table from migration 0001
 - Protected routing, role-based navigation, responsive application shell
 - PWA manifest, installable icons, offline fallback, update prompt
 - Australian English, Australia/Sydney timezone, AUD, `dd/mm/yyyy` dates
 
-Rostering, the time clock, timesheets, notifications, dashboards and reporting
-are scaffolded as routes with enforced access, and are built in later
-milestones. The application says so on screen rather than showing fake data.
+**Milestone 2 — database.** Complete and verified:
+
+- 36 tables covering teams, employment, availability, leave, rostering,
+  clocking, timesheets, announcements, tasks, documents, notifications,
+  push subscriptions, audit logs and organisation settings
+- Row Level Security **enabled and forced** on every table — 97 policies
+- Audit logging with before/after values, credentials redacted
+- Development seed data: both motels, three teams, seven demo accounts
+- TypeScript types generated from the live schema
+- **27 RLS tests passing** across five roles — see [SECURITY.md](SECURITY.md)
+
+The UI for rostering, the time clock, timesheets, notifications, dashboards
+and reporting is scaffolded as routes with enforced access and is built in
+later milestones. The application says so on screen rather than showing fake
+data.
 
 ---
 
@@ -76,8 +87,17 @@ npx supabase link --project-ref YOUR_PROJECT_REF
 npx supabase db push
 ```
 
-Alternatively, paste `supabase/migrations/0001_identity_and_access.sql` into
-the Supabase dashboard SQL editor and run it.
+Alternatively, paste each file in `supabase/migrations/` into the Supabase
+dashboard SQL editor in numerical order (0001 → 0004).
+
+To run the stack locally instead, with Docker running:
+
+```bash
+npm run db:reset
+```
+
+That applies every migration and loads the development seed data. Verify the
+security policies with `npm run db:test`.
 
 **5. Create the first owner**
 
@@ -159,6 +179,20 @@ npm test
 npm run build
 ```
 
+Database (requires Docker running):
+
+```bash
+npm run db:reset
+```
+
+```bash
+npm run db:test
+```
+
+```bash
+npm run db:types
+```
+
 ---
 
 ## Architecture
@@ -202,9 +236,11 @@ A user who defeats layers 1 and 2 in the browser still cannot read a row the
 database will not release. Notable policy decisions:
 
 - Supervisors cannot see pay rates, employment records or emergency contacts.
-- Deactivating or archiving a profile revokes access immediately: the
-  `has_role_at_least()` and `current_organisation_id()` helpers both return
-  nothing for inactive users, so every policy depending on them fails shut.
+- Deactivating or archiving a profile revokes access immediately. Self-scoped
+  policies compare against `active_uid()`, which returns NULL once an account
+  is disabled, so `user_id = active_uid()` filters the row out rather than
+  waiting for the JWT to expire. This was a real bug the RLS tests caught —
+  see [SECURITY.md](SECURITY.md#deactivation-must-revoke-access-instantly-not-at-token-expiry).
 - `audit_logs` has no `UPDATE` or `DELETE` policy at all, making it
   append-only through the client API.
 - Triggers block privilege escalation that RLS alone cannot express: a staff
@@ -242,9 +278,11 @@ Scope `SUPABASE_SECRET_KEY` to Production and Preview only.
 
 ## Known limitations
 
-- The `Database` type in `src/types/database.ts` is hand-maintained for the
-  0001 schema. Once the full schema lands, regenerate it with
-  `npx supabase gen types typescript --linked`.
+- `src/types/database.ts` is **generated**. Never edit it by hand — run
+  `npm run db:types` after any migration change.
+- Storage bucket policies and signed-URL issuance are not written yet, so
+  document and attachment upload is not usable. See
+  [SECURITY.md](SECURITY.md#known-gaps) for the full list of gaps.
 - `npm audit` reports one **development-only** advisory in `brace-expansion`,
   reached through the ESLint toolchain. Its only patched release is a major
   version that breaks `minimatch@3`, and it never reaches the production

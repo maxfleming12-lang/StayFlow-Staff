@@ -203,6 +203,61 @@ create index if not exists audit_logs_org_created_idx
 -- search_path is pinned to prevent search-path hijacking.
 -- =====================================================================
 
+/**
+ * True when there is no end-user JWT on this connection.
+ *
+ * That means the caller is trusted server-side code: the service-role key,
+ * a migration, or a seed script. A browser always presents a JWT (anon or
+ * authenticated), and `anon` holds no grants on any application table, so
+ * this cannot be reached from a client.
+ *
+ * The privilege-escalation guards below consult this so they restrain
+ * users without also blocking legitimate provisioning — creating the first
+ * owner, or an administrator running a server-side invite.
+ */
+create or replace function is_service_context()
+returns boolean
+language sql
+stable
+as $$
+  select auth.uid() is null;
+$$;
+
+comment on function is_service_context() is
+  'True when no end-user JWT is present, i.e. trusted server-side code.';
+
+/**
+ * The caller's user id, but ONLY while their profile is active and not
+ * archived. Returns NULL otherwise.
+ *
+ * Policies compare against this rather than auth.uid() directly. The
+ * difference matters: `user_id = auth.uid()` still matches for a staff
+ * member who was disabled thirty seconds ago but whose JWT has not yet
+ * expired, so they could keep reading their own roster and employment
+ * record straight from the API. `user_id = active_uid()` evaluates to
+ * NULL for that user, and a NULL predicate filters the row out.
+ *
+ * SECURITY DEFINER so it can read profiles without tripping that table's
+ * own policies — which would otherwise recurse.
+ */
+create or replace function active_uid()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select p.id
+  from profiles p
+  where p.id = auth.uid()
+    and p.is_active
+    and p.archived_at is null;
+$$;
+
+comment on function active_uid() is
+  'Caller''s id while their account is active; NULL once disabled or
+   archived, so every self-scoped policy fails shut immediately.';
+
 create or replace function current_organisation_id()
 returns uuid
 language sql
@@ -350,7 +405,7 @@ create policy properties_write_admin on properties
 -- deliberately not in this table.
 create policy profiles_select_self on profiles
   for select to authenticated
-  using (id = auth.uid());
+  using (id = active_uid());
 
 create policy profiles_select_colleagues on profiles
   for select to authenticated
@@ -365,8 +420,8 @@ create policy profiles_select_colleagues on profiles
 -- disabled account.
 create policy profiles_update_self on profiles
   for update to authenticated
-  using (id = auth.uid())
-  with check (id = auth.uid());
+  using (id = active_uid())
+  with check (id = active_uid());
 
 create policy profiles_update_admin on profiles
   for update to authenticated
@@ -400,6 +455,10 @@ security definer
 set search_path = public
 as $$
 begin
+  if is_service_context() then
+    return new;
+  end if;
+
   if auth.uid() = new.id and not has_role_at_least('administrator') then
     if new.organisation_id     is distinct from old.organisation_id
        or new.is_active        is distinct from old.is_active
@@ -421,7 +480,7 @@ create trigger profiles_guard_self_update
 -- --- user_roles ------------------------------------------------------
 create policy user_roles_select_self on user_roles
   for select to authenticated
-  using (user_id = auth.uid());
+  using (user_id = active_uid());
 
 create policy user_roles_select_management on user_roles
   for select to authenticated
@@ -445,6 +504,11 @@ declare
   target_user uuid := coalesce(new.user_id, old.user_id);
   target_role app_role := coalesce(new.role, old.role);
 begin
+  -- Trusted server-side provisioning is not a privilege-escalation risk.
+  if is_service_context() then
+    return coalesce(new, old);
+  end if;
+
   if target_user = auth.uid() then
     raise exception 'You may not change your own roles.';
   end if;
@@ -483,7 +547,7 @@ create trigger user_roles_guard
 -- --- user_property_access -------------------------------------------
 create policy upa_select_self on user_property_access
   for select to authenticated
-  using (user_id = auth.uid());
+  using (user_id = active_uid());
 
 create policy upa_select_management on user_property_access
   for select to authenticated
