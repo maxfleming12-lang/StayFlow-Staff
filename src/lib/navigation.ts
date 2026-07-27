@@ -133,6 +133,13 @@ export const NAV_ITEMS: NavItem[] = [
     minimumRole: "manager",
   },
   {
+    id: "manage-timesheets",
+    label: "Timesheets",
+    href: "/manage/timesheets",
+    icon: "timesheet",
+    minimumRole: "manager",
+  },
+  {
     id: "manage-kiosk",
     label: "Kiosk devices",
     href: "/manage/kiosk",
