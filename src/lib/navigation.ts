@@ -110,6 +110,13 @@ export const NAV_ITEMS: NavItem[] = [
     minimumRole: "manager",
   },
   {
+    id: "manage-availability",
+    label: "Availability",
+    href: "/manage/availability",
+    icon: "calendar",
+    minimumRole: "manager",
+  },
+  {
     id: "team",
     label: "Team",
     href: "/team",
