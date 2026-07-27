@@ -796,6 +796,67 @@ export type Database = {
           },
         ]
       }
+      kiosk_sessions: {
+        Row: {
+          created_at: string
+          created_by: string
+          device_label: string | null
+          expires_at: string
+          id: string
+          last_used_at: string | null
+          organisation_id: string
+          property_id: string
+          revoked_at: string | null
+          token: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          device_label?: string | null
+          expires_at: string
+          id?: string
+          last_used_at?: string | null
+          organisation_id: string
+          property_id: string
+          revoked_at?: string | null
+          token: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          device_label?: string | null
+          expires_at?: string
+          id?: string
+          last_used_at?: string | null
+          organisation_id?: string
+          property_id?: string
+          revoked_at?: string | null
+          token?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "kiosk_sessions_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "kiosk_sessions_organisation_id_fkey"
+            columns: ["organisation_id"]
+            isOneToOne: false
+            referencedRelation: "organisations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "kiosk_sessions_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       leave_requests: {
         Row: {
           archived_at: string | null
@@ -2413,6 +2474,10 @@ export type Database = {
         Args: { minimum: Database["public"]["Enums"]["app_role"] }
         Returns: boolean
       }
+      has_visible_offer: {
+        Args: { p_shift: string; p_user: string }
+        Returns: boolean
+      }
       is_service_context: { Args: never; Returns: boolean }
       manages_property: {
         Args: { target_property_id: string }
@@ -2420,9 +2485,18 @@ export type Database = {
       }
       manages_user: { Args: { target_user_id: string }; Returns: boolean }
       redact_sensitive: { Args: { payload: Json }; Returns: Json }
+      set_kiosk_pin: {
+        Args: { p_pin: string; p_user: string }
+        Returns: undefined
+      }
       shares_organisation: {
         Args: { target_user_id: string }
         Returns: boolean
+      }
+      shift_property_of: { Args: { p_shift: string }; Returns: string }
+      verify_kiosk_pin: {
+        Args: { p_pin: string; p_user: string }
+        Returns: string
       }
       write_audit_log: {
         Args: {

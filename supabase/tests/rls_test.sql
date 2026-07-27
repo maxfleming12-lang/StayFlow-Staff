@@ -93,6 +93,7 @@ declare
   repl_shift   uuid := '11111111-0000-4000-8000-000000000006';
   repl_req     uuid := '11111111-0000-4000-8000-000000000007';
   repl_offer   uuid := '11111111-0000-4000-8000-000000000008';
+  kiosk_sess   uuid := '11111111-0000-4000-8000-000000000009';
   u_staff2     uuid := '00000000-0000-4000-8000-000000000104';
 begin
   -- ==============================================================
@@ -720,6 +721,8 @@ begin
   delete from open_shift_offers where id = repl_offer;
   delete from shift_replacement_requests where id = repl_req;
   delete from shifts where id = repl_shift;
+  delete from kiosk_sessions where id = kiosk_sess;
+  delete from kiosk_credentials where user_id = u_staff1;
   delete from tasks where id = lodge_task;
   delete from teams where id = lodge_team;
   delete from organisations where id = rival_org;
@@ -815,6 +818,92 @@ begin
   perform rls_harness.act_as_harness();
   perform rls_harness.record_check('shifts', 'staff (other property)',
     'cannot read a shift behind an offer they cannot claim', n = 0);
+
+
+  -- ==============================================================
+  -- KIOSK (migration 0013)
+  -- ==============================================================
+
+  -- PIN hashes must be unreachable from every client role.
+  perform rls_harness.act_as_harness();
+  perform set_kiosk_pin(u_staff1, '4821');
+
+  -- Not merely "returns no rows": the client roles hold no grant at all, so
+  -- the table cannot even be queried.
+  perform rls_harness.act_as(u_owner);
+  begin
+    select count(*) into n from kiosk_credentials;
+    ok := false;
+  exception when insufficient_privilege then
+    ok := true;
+  when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('kiosk_credentials', 'owner',
+    'cannot even query the PIN table', ok);
+
+  -- The PIN functions must be callable only by trusted server code.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    perform verify_kiosk_pin(u_staff1, '4821');
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('verify_kiosk_pin', 'staff',
+    'cannot call the PIN verifier directly', ok);
+
+  perform rls_harness.act_as(u_manager);
+  begin
+    perform set_kiosk_pin(u_staff2, '1111');
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('set_kiosk_pin', 'manager',
+    'cannot set a PIN without going through the server', ok);
+
+  -- Lockout is enforced inside the database, so a client cannot reset it.
+  perform rls_harness.act_as_harness();
+  perform verify_kiosk_pin(u_staff1, '0000');
+  perform verify_kiosk_pin(u_staff1, '0000');
+  perform verify_kiosk_pin(u_staff1, '0000');
+  perform verify_kiosk_pin(u_staff1, '0000');
+  perform verify_kiosk_pin(u_staff1, '0000');
+  perform rls_harness.record_check('verify_kiosk_pin', 'anyone',
+    'locks out after the configured attempts',
+    verify_kiosk_pin(u_staff1, '4821') = 'locked');
+
+  -- A kiosk device token must not be readable by staff.
+  perform rls_harness.act_as_harness();
+  insert into kiosk_sessions (id, organisation_id, property_id, token,
+                              created_by, expires_at)
+  values (kiosk_sess, org_id, coastal_id, 'harness_token_0123456789abcdefghij',
+          u_manager, now() + interval '30 days')
+  on conflict (id) do nothing;
+
+  perform rls_harness.act_as(u_staff1);
+  select count(*) into n from kiosk_sessions;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('kiosk_sessions', 'staff',
+    'cannot see authorised kiosk devices', n = 0);
+
+  -- A manager CAN revoke a device. This failed before the updated_at column
+  -- was added: the trigger raised and every revoke silently did nothing.
+  perform rls_harness.act_as(u_manager);
+  begin
+    update kiosk_sessions set revoked_at = now() where id = kiosk_sess;
+    get diagnostics n = row_count;
+    ok := (n = 1);
+  exception when others then
+    ok := false;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('kiosk_sessions', 'manager',
+    'can revoke a device (updated_at trigger works)', ok);
 
   -- ==============================================================
   -- ANONYMOUS ACCESS

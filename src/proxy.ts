@@ -90,6 +90,13 @@ const PUBLIC_PATHS = [
    * is a bearer credential; the route authenticates it itself.
    */
   "/api/calendar",
+  /**
+   * The kiosk. A shared tablet deliberately holds no staff session — it
+   * authenticates as a DEVICE via its own httpOnly cookie, and gates every
+   * action behind the individual's PIN. Sending it to /login would defeat
+   * the point, since there is nobody to sign in as.
+   */
+  "/kiosk",
 ];
 
 export const config = {
