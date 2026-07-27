@@ -704,6 +704,19 @@ begin
   perform rls_harness.record_check('task_comments', 'staff',
     'cannot comment on a task at an inaccessible property', ok);
 
+  -- Remove fixtures this suite created, so a developer inspecting the
+  -- database afterwards is not misled by leftover test rows.
+  perform rls_harness.act_as_harness();
+  delete from leave_requests where id = mgr_leave;
+  delete from timesheets where id in (rival_ts, mgr_ts, ts_id);
+  delete from clock_events where user_id = u_staff1;
+  delete from push_subscriptions where user_id = u_staff1;
+  delete from shift_acknowledgements where shift_id = shift_ccm;
+  delete from shifts where id = shift_ccm;
+  delete from tasks where id = lodge_task;
+  delete from teams where id = lodge_team;
+  delete from organisations where id = rival_org;
+
   -- ==============================================================
   -- ANONYMOUS ACCESS
   -- ==============================================================
