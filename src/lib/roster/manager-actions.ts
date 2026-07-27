@@ -16,6 +16,25 @@ export interface RosterActionState {
   conflicts?: Conflict[];
   /** True when the caller must resubmit with an override reason. */
   needsOverride?: boolean;
+  /**
+   * The values that were submitted, echoed back.
+   *
+   * The conflict path returns WITHOUT saving and re-renders the form to ask
+   * for an override reason. Uncontrolled inputs reset to their defaultValue
+   * on that re-render, so without echoing these back the manager would
+   * acknowledge a warning about one shift and silently save a different
+   * one — observed resetting a named staff member to "unassigned" and the
+   * date back to the start of the week.
+   */
+  values?: {
+    propertyId?: string;
+    userId?: string;
+    startsAt?: string;
+    endsAt?: string;
+    notes?: string;
+    requiredRole?: string;
+    breakMinutes?: string;
+  };
 }
 
 const shiftSchema = z
@@ -77,10 +96,32 @@ export async function saveShift(
       const key = String(issue.path[0] ?? "form");
       fieldErrors[key] ??= issue.message;
     }
-    return { fieldErrors };
+    return {
+      fieldErrors,
+      values: {
+        propertyId: (formData.get("propertyId") as string) ?? "",
+        userId: (formData.get("userId") as string) ?? "",
+        startsAt: (formData.get("startsAt") as string) ?? "",
+        endsAt: (formData.get("endsAt") as string) ?? "",
+        notes: (formData.get("notes") as string) ?? "",
+        requiredRole: (formData.get("requiredRole") as string) ?? "",
+        breakMinutes: (formData.get("breakMinutes") as string) ?? "",
+      },
+    };
   }
 
   const input = parsed.data;
+
+  // Echoed back on every return path so the form can restore itself.
+  const values = {
+    propertyId: input.propertyId,
+    userId: input.userId ?? "",
+    startsAt: input.startsAt,
+    endsAt: input.endsAt,
+    notes: input.notes ?? "",
+    requiredRole: input.requiredRole ?? "",
+    breakMinutes: input.breakMinutes != null ? String(input.breakMinutes) : "",
+  };
 
   try {
     let conflicts: Conflict[] = [];
@@ -102,6 +143,7 @@ export async function saveShift(
         return {
           conflicts,
           needsOverride: true,
+          values,
           error:
             "This shift conflicts with something. Review the warnings and give a reason to roster it anyway.",
         };
@@ -139,6 +181,7 @@ export async function saveShift(
       return {
         error: error?.message ?? "Could not save the shift.",
         conflicts,
+        values,
       };
     }
 
@@ -160,7 +203,10 @@ export async function saveShift(
       conflicts,
     };
   } catch {
-    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+    return {
+      error: "Cannot reach StayFlow right now. Try again shortly.",
+      values,
+    };
   }
 }
 

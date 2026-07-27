@@ -486,6 +486,10 @@ begin
   perform rls_harness.act_as_harness();
   perform rls_harness.record_check('profiles', 'staff',
     'can still update preferred name and mobile', ok);
+  -- Restore the seeded value: a test that mutates shared fixtures and does
+  -- not put them back makes later output confusing to read.
+  update profiles set preferred_name = 'Aroha', mobile_number = '0400 000 000'
+    where id = u_staff1;
 
   -- Cross-tenant role injection.
   perform rls_harness.act_as_harness();

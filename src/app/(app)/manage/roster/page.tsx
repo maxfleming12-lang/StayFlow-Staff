@@ -14,6 +14,7 @@ import { formatCurrency, formatHours } from "@/lib/format";
 import { estimatedCost } from "@/lib/roster/hours";
 import { RosterGrid } from "@/components/roster/roster-grid";
 import { PublishRoster } from "@/components/roster/publish-roster";
+import { ShiftForm } from "@/components/roster/shift-form";
 
 export const metadata: Metadata = {
   title: "Roster · StayFlow Staff",
@@ -168,6 +169,12 @@ export default async function ManageRosterPage({
           </dd>
         </div>
       </dl>
+
+      <ShiftForm
+        properties={roster.properties}
+        staff={roster.staff}
+        defaultDate={days[0]}
+      />
 
       <RosterGrid
         days={days}
