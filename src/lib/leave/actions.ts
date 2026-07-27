@@ -2,10 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import {
-  createClient,
-  createServiceRoleClient,
-} from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
+import { notify } from "@/lib/notifications/deliver";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import { LEAVE_CATEGORIES, suggestedHours } from "./hours";
 
@@ -208,21 +206,20 @@ export async function decideLeave(
       return { error: "That request is no longer available to decide." };
     }
 
-    // Notifications have no INSERT policy by design, so the system writes
-    // them server-side. Failure must be visible, not swallowed.
-    const admin = createServiceRoleClient();
-    const { error: notifyError } = await admin.from("notifications").insert({
-      organisation_id: data.organisation_id,
-      property_id: data.property_id,
-      user_id: data.user_id,
-      category: "leave_update" as const,
+    // notify() records the row AND pushes it, respecting the person's
+    // preferences and quiet hours. No dates, reasons or medical detail in
+    // the body — this can appear on a lock screen.
+    const { error: notifyError } = await notify({
+      organisationId: data.organisation_id,
+      propertyId: data.property_id,
+      userIds: [data.user_id],
+      category: "leave_update",
       title: decision === "approved" ? "Leave approved" : "Leave declined",
-      // No dates, reasons or medical detail — this can appear on a lock screen.
       body:
         decision === "approved"
           ? "Your leave request has been approved."
           : "Your leave request was declined. Open StayFlow for details.",
-      deep_link: "/leave",
+      deepLink: "/leave",
     });
 
     revalidatePath("/manage/leave");
@@ -230,7 +227,7 @@ export async function decideLeave(
 
     if (notifyError) {
       return {
-        success: `Leave ${decision}, but the staff member could not be notified: ${notifyError.message}`,
+        success: `Leave ${decision}, but the staff member could not be notified: ${notifyError}`,
       };
     }
     return { success: `Leave ${decision}.` };

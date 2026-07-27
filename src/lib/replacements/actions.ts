@@ -7,6 +7,7 @@ import {
   createServiceRoleClient,
 } from "@/lib/supabase/server";
 import { requireRole, requireUser } from "@/lib/auth/session";
+import { notify } from "@/lib/notifications/deliver";
 
 export interface ReplacementActionState {
   error?: string;
@@ -209,23 +210,20 @@ export async function offerReplacement(
     if (statusError) return { error: statusError.message };
 
     // Notify the people who can actually take it.
-    const admin = createServiceRoleClient();
     const targets =
       recipients.length > 0
         ? recipients
         : await eligibleUserIds(request.shift_id);
 
     if (targets.length > 0) {
-      await admin.from("notifications").insert(
-        targets.map((uid) => ({
-          organisation_id: request.organisation_id,
-          user_id: uid,
-          category: "open_shift" as const,
-          title: "A shift is available",
-          body: "A shift needs cover. Open StayFlow to see it.",
-          deep_link: "/available-shifts",
-        })),
-      );
+      await notify({
+        organisationId: request.organisation_id,
+        userIds: targets,
+        category: "open_shift",
+        title: "A shift is available",
+        body: "A shift needs cover. Open StayFlow to see it.",
+        deepLink: "/available-shifts",
+      });
     }
 
     revalidatePath("/manage/replacements");
@@ -380,14 +378,14 @@ async function assignShift(
     status: "pending",
   });
 
-  await admin.from("notifications").insert({
-    organisation_id: shift.organisation_id,
-    property_id: shift.property_id,
-    user_id: newUserId,
-    category: "replacement_update" as const,
+  await notify({
+    organisationId: shift.organisation_id,
+    propertyId: shift.property_id,
+    userIds: [newUserId],
+    category: "replacement_update",
     title: "Shift confirmed",
     body: "A shift has been added to your roster. Open StayFlow to review it.",
-    deep_link: "/roster",
+    deepLink: "/roster",
   });
 
   void actorId;
@@ -458,18 +456,17 @@ export async function decideReplacement(
       if (result.error) return result;
     }
 
-    const admin = createServiceRoleClient();
-    await admin.from("notifications").insert({
-      organisation_id: request.organisation_id,
-      user_id: request.requested_by,
-      category: "replacement_update" as const,
+    await notify({
+      organisationId: request.organisation_id,
+      userIds: [request.requested_by],
+      category: "replacement_update",
       title:
         decision === "approved" ? "Cover arranged" : "Replacement not approved",
       body:
         decision === "approved"
           ? "Your shift has been handed over. Open StayFlow to check your roster."
           : "Your replacement request was not approved. You are still rostered.",
-      deep_link: "/roster",
+      deepLink: "/roster",
     });
 
     revalidatePath("/manage/replacements");

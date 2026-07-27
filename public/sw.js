@@ -111,3 +111,63 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* Push notifications                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Show an incoming push.
+ *
+ * The payload carries only what is safe on a lock screen — the server is
+ * responsible for that — so this displays it as sent without embellishment.
+ * A malformed or empty payload still shows something generic rather than
+ * nothing, because a silent push looks to the user like a lost message.
+ */
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {};
+  }
+
+  const title = payload.title || "StayFlow";
+  const options = {
+    body: payload.body || "Open StayFlow for details.",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    // Same tag per category, so a second roster notification replaces the
+    // first rather than stacking three identical ones on the lock screen.
+    tag: payload.category || "stayflow",
+    renotify: true,
+    data: { url: payload.url || "/" },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+/**
+ * Focus an existing tab rather than opening another.
+ *
+ * Someone tapping three notifications should not end up with three copies
+ * of the app open.
+ */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          if ("focus" in client) {
+            client.navigate(target);
+            return client.focus();
+          }
+        }
+        return self.clients.openWindow(target);
+      }),
+  );
+});

@@ -6,6 +6,8 @@ import { BUILD_INFO } from "@/lib/build-info";
 import { siteUrl } from "@/lib/supabase/env";
 import { getMyCalendarToken } from "@/lib/calendar/actions";
 import { CalendarSubscription } from "@/components/calendar/calendar-subscription";
+import { NotificationSettings } from "@/components/notifications/notification-settings";
+import { getMyNotificationPreferences } from "@/lib/notifications/actions";
 
 export const metadata: Metadata = {
   title: "Settings · StayFlow Staff",
@@ -33,6 +35,7 @@ function Row({ label, value }: { label: string; value: string }) {
 export default async function SettingsPage() {
   const user = await requireUser();
   const calendarToken = await getMyCalendarToken();
+  const { preferences, devices } = await getMyNotificationPreferences();
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -59,6 +62,14 @@ export default async function SettingsPage() {
           />
         </dl>
       </section>
+
+      <NotificationSettings
+        vapidPublicKey={process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? null}
+        devices={devices}
+        mutedCategories={preferences?.mutedCategories ?? []}
+        quietHoursStart={preferences?.quietHoursStart ?? null}
+        quietHoursEnd={preferences?.quietHoursEnd ?? null}
+      />
 
       <CalendarSubscription token={calendarToken} siteUrl={siteUrl()} />
 

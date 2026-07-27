@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
+import { notify } from "@/lib/notifications/deliver";
 import { requireRole } from "@/lib/auth/session";
 import { findConflicts, requiresOverride, type Conflict } from "./conflicts";
 import { getConflictContext } from "./manager-queries";
@@ -355,37 +356,25 @@ export async function publishRoster(
       );
     }
 
-    // One notification per affected person, not per shift — a staff member
-    // with five new shifts wants one message, not five.
-    //
-    // Written with the service-role client because `notifications` has no
-    // INSERT policy by design: a client that could insert them could forge a
-    // message appearing to come from management. This is server-side code
-    // that has already verified the caller is a manager for this property.
+    // One notification per affected person, not per shift — someone with
+    // five new shifts wants one message, not five.
     const affected = [...new Set(assigned.map((s) => s.user_id as string))];
     if (affected.length > 0) {
       const { formatWeekLabel } = await import("./week");
-      const admin = createServiceRoleClient();
-      const { error: notifyError } = await admin.from("notifications").insert(
-        affected.map((userId) => ({
-          organisation_id: user.organisationId,
-          property_id: propertyId,
-          user_id: userId,
-          category: "roster_published" as const,
-          title: "Roster published",
-          // Deliberately free of times, names and pay — this text can appear
-          // on a locked phone in a public area.
-          body: `Your roster for ${formatWeekLabel(weekStartDate)} has been published.`,
-          deep_link: "/roster",
-        })),
-      );
+      const result = await notify({
+        organisationId: user.organisationId,
+        propertyId,
+        userIds: affected,
+        category: "roster_published",
+        title: "Roster published",
+        // Free of times, names and pay — this can appear on a locked phone.
+        body: `Your roster for ${formatWeekLabel(weekStartDate)} has been published.`,
+        deepLink: "/roster",
+      });
 
-      // The roster is published either way, so this must not fail the action —
-      // but it must not vanish silently either, or nobody learns that staff
-      // were never told.
-      if (notifyError) {
+      if (result.error) {
         return {
-          success: `Published ${published?.length ?? 0} shift(s), but staff could not be notified: ${notifyError.message}`,
+          success: `Published ${published?.length ?? 0} shift(s), but staff could not be notified: ${result.error}`,
         };
       }
     }

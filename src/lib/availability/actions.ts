@@ -2,10 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import {
-  createClient,
-  createServiceRoleClient,
-} from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
+import { notify } from "@/lib/notifications/deliver";
 import { requireRole, requireUser } from "@/lib/auth/session";
 
 export interface AvailabilityActionState {
@@ -194,12 +192,10 @@ export async function decideAvailability(
       return { error: "That submission is no longer available to decide." };
     }
 
-    // No INSERT policy on notifications by design, so the system writes it.
-    const admin = createServiceRoleClient();
-    const { error: notifyError } = await admin.from("notifications").insert({
-      organisation_id: data.organisation_id,
-      user_id: data.user_id,
-      category: "availability_update" as const,
+    const { error: notifyError } = await notify({
+      organisationId: data.organisation_id,
+      userIds: [data.user_id],
+      category: "availability_update",
       title:
         decision === "approved"
           ? "Availability approved"
@@ -208,7 +204,7 @@ export async function decideAvailability(
         decision === "approved"
           ? "Your availability update has been approved."
           : "Your availability update was not approved. Open StayFlow for details.",
-      deep_link: "/availability",
+      deepLink: "/availability",
     });
 
     revalidatePath("/manage/availability");
@@ -216,7 +212,7 @@ export async function decideAvailability(
 
     if (notifyError) {
       return {
-        success: `Availability ${decision}, but the staff member could not be notified: ${notifyError.message}`,
+        success: `Availability ${decision}, but the staff member could not be notified: ${notifyError}`,
       };
     }
     return { success: `Availability ${decision}.` };
