@@ -34,7 +34,8 @@ export type NavIcon =
   | "checklist"
   | "folder"
   | "chart"
-  | "settings";
+  | "settings"
+  | "swap";
 
 /** Every destination in the application, in navigation order. */
 export const NAV_ITEMS: NavItem[] = [
@@ -73,6 +74,14 @@ export const NAV_ITEMS: NavItem[] = [
     icon: "timesheet",
     minimumRole: "staff",
     primary: true,
+  },
+  {
+    id: "available-shifts",
+    label: "Available shifts",
+    shortLabel: "Cover",
+    href: "/available-shifts",
+    icon: "swap",
+    minimumRole: "staff",
   },
   {
     id: "tasks",
@@ -114,6 +123,13 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Availability",
     href: "/manage/availability",
     icon: "calendar",
+    minimumRole: "manager",
+  },
+  {
+    id: "manage-replacements",
+    label: "Shift cover",
+    href: "/manage/replacements",
+    icon: "swap",
     minimumRole: "manager",
   },
   {

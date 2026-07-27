@@ -90,6 +90,10 @@ declare
   mgr_leave    uuid := '11111111-0000-4000-8000-000000000003';
   lodge_team   uuid := '11111111-0000-4000-8000-000000000004';
   lodge_task   uuid := '11111111-0000-4000-8000-000000000005';
+  repl_shift   uuid := '11111111-0000-4000-8000-000000000006';
+  repl_req     uuid := '11111111-0000-4000-8000-000000000007';
+  repl_offer   uuid := '11111111-0000-4000-8000-000000000008';
+  u_staff2     uuid := '00000000-0000-4000-8000-000000000104';
 begin
   -- ==============================================================
   -- Fixtures created as the harness (service context)
@@ -713,9 +717,104 @@ begin
   delete from push_subscriptions where user_id = u_staff1;
   delete from shift_acknowledgements where shift_id = shift_ccm;
   delete from shifts where id = shift_ccm;
+  delete from open_shift_offers where id = repl_offer;
+  delete from shift_replacement_requests where id = repl_req;
+  delete from shifts where id = repl_shift;
   delete from tasks where id = lodge_task;
   delete from teams where id = lodge_team;
   delete from organisations where id = rival_org;
+
+
+  -- ==============================================================
+  -- SHIFT REPLACEMENTS (migrations 0011, 0012)
+  -- ==============================================================
+
+  perform rls_harness.act_as_harness();
+  insert into shifts (id, organisation_id, property_id, user_id,
+                      starts_at, ends_at, status, published_at)
+  values (repl_shift, org_id, coastal_id, u_staff1,
+          now() + interval '6 days', now() + interval '6 days 8 hours',
+          'published', now())
+  on conflict (id) do nothing;
+
+  insert into shift_replacement_requests (id, organisation_id, shift_id,
+                                          requested_by, reason, status)
+  values (repl_req, org_id, repl_shift, u_staff1, 'Family commitment', 'requested')
+  on conflict (id) do nothing;
+
+  -- Staff may not decide their own replacement request.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    update shift_replacement_requests set status = 'approved' where id = repl_req;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('shift_replacement_requests', 'staff',
+    'cannot approve their own replacement request', ok);
+
+  -- Nor nominate a replacement while withdrawing.
+  perform rls_harness.act_as(u_staff1);
+  begin
+    update shift_replacement_requests
+      set status = 'withdrawn', replacement_user_id = u_staff2
+      where id = repl_req;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('shift_replacement_requests', 'staff',
+    'cannot nominate a replacement while withdrawing', ok);
+
+  -- The state machine refuses to skip straight to approved.
+  perform rls_harness.act_as(u_manager);
+  begin
+    update shift_replacement_requests set status = 'approved' where id = repl_req;
+    ok := false;
+  exception when others then
+    ok := true;
+  end;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('shift_replacement_requests', 'manager',
+    'cannot skip requested straight to approved', ok);
+
+  -- An offer to everyone must be VISIBLE to eligible staff. This failed
+  -- before 0012: the policy read the shifts table through the caller's own
+  -- RLS, and a colleague cannot see a shift that still belongs to someone
+  -- else, so every offer silently vanished.
+  perform rls_harness.act_as_harness();
+  update shift_replacement_requests set status = 'offered' where id = repl_req;
+  insert into open_shift_offers (id, organisation_id, shift_id,
+                                 offered_to_user_id, status)
+  values (repl_offer, org_id, repl_shift, null, 'offered')
+  on conflict (id) do nothing;
+
+  perform rls_harness.act_as(u_staff2);   -- Coastal, eligible
+  select count(*) into n from open_shift_offers where id = repl_offer;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('open_shift_offers', 'staff (eligible)',
+    'can see a shift offered to all eligible staff', n = 1);
+
+  perform rls_harness.act_as(u_staff2);
+  select count(*) into n from shifts where id = repl_shift;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('shifts', 'staff (eligible)',
+    'can read the shift behind an offer they may claim', n = 1);
+
+  -- ...but not staff at another property.
+  perform rls_harness.act_as(u_staff3);   -- Holiday Lodge only
+  select count(*) into n from open_shift_offers where id = repl_offer;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('open_shift_offers', 'staff (other property)',
+    'cannot see an offer for a property they cannot work at', n = 0);
+
+  perform rls_harness.act_as(u_staff3);
+  select count(*) into n from shifts where id = repl_shift;
+  perform rls_harness.act_as_harness();
+  perform rls_harness.record_check('shifts', 'staff (other property)',
+    'cannot read a shift behind an offer they cannot claim', n = 0);
 
   -- ==============================================================
   -- ANONYMOUS ACCESS

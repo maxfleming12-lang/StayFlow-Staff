@@ -1,4 +1,5 @@
 import {
+  ArrowLeftRight,
   BarChart3,
   CalendarDays,
   ClipboardCheck,
@@ -24,6 +25,7 @@ const ICONS = {
   folder: FolderClosed,
   chart: BarChart3,
   settings: Settings,
+  swap: ArrowLeftRight,
 } as const;
 
 /**

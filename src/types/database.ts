@@ -1062,6 +1062,13 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "open_shift_offers_offered_profile_fk"
+            columns: ["offered_to_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "open_shift_offers_organisation_id_fkey"
             columns: ["organisation_id"]
             isOneToOne: false
@@ -1588,6 +1595,20 @@ export type Database = {
             columns: ["organisation_id"]
             isOneToOne: false
             referencedRelation: "organisations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shift_replacement_requests_profile_fk"
+            columns: ["requested_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shift_replacement_requests_replacement_profile_fk"
+            columns: ["replacement_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
           {

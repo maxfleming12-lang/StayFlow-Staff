@@ -3,6 +3,7 @@ import type { StaffShift } from "@/lib/roster/queries";
 import { formatHours, formatLongDate, formatTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ShiftResponse } from "./shift-response";
+import { RequestReplacement } from "./request-replacement";
 
 /** Badge describing the acknowledgement state of a shift. */
 function AckBadge({ status }: { status: string }) {
@@ -108,6 +109,11 @@ export function ShiftCard({ shift }: { shift: StaffShift }) {
       {shift.acknowledgement?.decisionRequired && (
         <ShiftResponse shiftId={shift.id} />
       )}
+
+      <RequestReplacement
+        shiftId={shift.id}
+        activeReplacement={shift.replacement}
+      />
     </article>
   );
 }

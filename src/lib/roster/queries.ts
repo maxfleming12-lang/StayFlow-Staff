@@ -27,6 +27,12 @@ export interface StaffShift {
     status: string;
     decisionRequired: boolean;
   } | null;
+  /**
+   * The staff member's own in-flight replacement request for this shift, if
+   * any. RLS on shift_replacement_requests already scopes the embed to rows
+   * they requested, so no extra filtering is needed here.
+   */
+  replacement: { id: string; status: string } | null;
 }
 
 /**
@@ -48,7 +54,8 @@ export async function getMyShifts(
        properties!shifts_property_id_fkey ( name, colour ),
        teams ( name ),
        shift_breaks ( duration_minutes, is_paid ),
-       shift_acknowledgements ( status )`,
+       shift_acknowledgements ( status ),
+       shift_replacement_requests ( id, status )`,
     )
     .gte("starts_at", fromIso)
     .order("starts_at", { ascending: true });
@@ -69,6 +76,14 @@ function mapShift(row: Record<string, unknown>): StaffShift {
   const acks = Array.isArray(row.shift_acknowledgements)
     ? row.shift_acknowledgements
     : [];
+  const replacements = Array.isArray(row.shift_replacement_requests)
+    ? row.shift_replacement_requests
+    : [];
+  // A shift can accumulate a withdrawn or rejected request before a fresh
+  // one; the in-flight request (if any) is what the card needs to show.
+  const activeReplacement = (
+    replacements as Record<string, unknown>[]
+  ).find((r) => ["requested", "offered", "claimed"].includes(String(r.status)));
 
   const mappedBreaks = breaks.map((b) => ({
     durationMinutes: Number((b as Record<string, unknown>).duration_minutes ?? 0),
@@ -97,6 +112,12 @@ function mapShift(row: Record<string, unknown>): StaffShift {
           // Only pending and viewed still need a decision from the staff
           // member; accepted and declined are settled.
           decisionRequired: ackStatus === "pending" || ackStatus === "viewed",
+        }
+      : null,
+    replacement: activeReplacement
+      ? {
+          id: String(activeReplacement.id),
+          status: String(activeReplacement.status),
         }
       : null,
   };
