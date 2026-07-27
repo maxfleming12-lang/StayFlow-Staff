@@ -15,6 +15,8 @@ import { estimatedCost } from "@/lib/roster/hours";
 import { RosterGrid } from "@/components/roster/roster-grid";
 import { PublishRoster } from "@/components/roster/publish-roster";
 import { ShiftForm } from "@/components/roster/shift-form";
+import { WeekTools } from "@/components/roster/week-tools";
+import { getTemplates } from "@/lib/roster/template-actions";
 
 export const metadata: Metadata = {
   title: "Roster · StayFlow Staff",
@@ -39,6 +41,7 @@ export default async function ManageRosterPage({
 
   const current = week && /^\d{4}-\d{2}-\d{2}$/.test(week) ? week : weekStart();
   const roster = await getRosterWeek(current, property);
+  const templates = await getTemplates(property);
   const days = weekDates(current);
 
   const showCost = canViewConfidentialEmployment(user.role);
@@ -182,6 +185,12 @@ export default async function ManageRosterPage({
         shifts={roster.shifts}
         properties={roster.properties}
         weekStartDate={current}
+      />
+
+      <WeekTools
+        weekStartDate={current}
+        properties={roster.properties}
+        templates={templates}
       />
 
       <PublishRoster
