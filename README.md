@@ -36,7 +36,7 @@ use it like a native app, including offline fallback and push notifications.
 - TypeScript types generated from the live schema
 - **27 RLS tests passing** across five roles — see [SECURITY.md](SECURITY.md)
 
-**Milestone 3 — rostering.** Partially complete:
+**Milestone 3 — rostering.** Complete:
 
 - Roster domain logic: hours, unpaid-break deduction, estimated cost, and a
   conflict engine (overlap, approved leave, unavailability, minimum rest,
@@ -50,11 +50,21 @@ use it like a native app, including offline fallback and push notifications.
   per-property publishing that records who published and when, creates
   acknowledgements and notifies affected staff.
 
+- Leave requests: staff submit, managers approve or decline with roster
+  conflicts shown inline. A manager cannot decide their own request.
+- Availability: recurring weekly rules and single-date overrides, approved by
+  a manager. Only approved availability produces roster warnings.
+- Shift replacements and open-shift claiming: request cover, offer it, claim
+  it, approve it. A request never removes anyone from the roster — the
+  original person stays rostered until a manager approves a replacement.
+- Copy week and roster templates, preserving local wall-clock times across
+  both daylight-saving changeovers.
+- Private, revocable iCalendar feed for Apple Calendar, Google Calendar and
+  Outlook.
+
 **Not yet built.** These routes exist with access enforced and say so on
-screen rather than showing fake data: leave requests, availability, shift
-replacements, open-shift claiming, copy/duplicate week, roster templates,
-the private iCalendar feed, the time clock, timesheets, push notifications,
-dashboards and reporting.
+screen rather than showing fake data: the time clock, timesheets, tasks,
+announcements, documents, push notifications, dashboards and reporting.
 
 ---
 
