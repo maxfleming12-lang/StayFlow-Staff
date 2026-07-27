@@ -3,6 +3,9 @@ import { requireUser } from "@/lib/auth/session";
 import { ROLE_LABEL, isOrganisationAdmin } from "@/lib/auth/roles";
 import { formatDateTime } from "@/lib/format";
 import { BUILD_INFO } from "@/lib/build-info";
+import { siteUrl } from "@/lib/supabase/env";
+import { getMyCalendarToken } from "@/lib/calendar/actions";
+import { CalendarSubscription } from "@/components/calendar/calendar-subscription";
 
 export const metadata: Metadata = {
   title: "Settings · StayFlow Staff",
@@ -29,6 +32,7 @@ function Row({ label, value }: { label: string; value: string }) {
  */
 export default async function SettingsPage() {
   const user = await requireUser();
+  const calendarToken = await getMyCalendarToken();
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -55,6 +59,8 @@ export default async function SettingsPage() {
           />
         </dl>
       </section>
+
+      <CalendarSubscription token={calendarToken} siteUrl={siteUrl()} />
 
       {isOrganisationAdmin(user.role) && (
         <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">

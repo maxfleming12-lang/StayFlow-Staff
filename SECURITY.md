@@ -169,6 +169,38 @@ update or delete their own subscriptions.
 text can appear on a locked phone in a public area. Templates say "Open
 StayFlow to review it" rather than naming times, pay or people.
 
+### The iCalendar feed is the one unauthenticated route
+
+`/api/calendar/[token]` has no session, because Apple Calendar, Google
+Calendar and Outlook subscribe over plain HTTPS and cannot sign in. The token
+in the URL **is** the credential, which shapes every decision in that route:
+
+- The token is 32 bytes from `randomBytes`, base64url-encoded. A CSPRNG, not
+  `Math.random` or a uuid, neither of which is built to resist prediction.
+- It is resolved with the service-role client, since there is no session for
+  RLS to evaluate. Results are then filtered explicitly by the resolved
+  `user_id` — the only place in this codebase where scoping is written by
+  hand rather than delegated to the database, and so the one place worth
+  reading closely.
+- Missing, malformed, unknown and revoked tokens all return an identical
+  bare 404. Distinguishing them would allow probing for valid tokens, and
+  would confirm that a revoked one had once existed.
+- Only that person's **published** shifts are returned. Verified by
+  inspection of a live feed: drafts absent, a colleague's shift absent, and
+  no pay rate, payroll reference, colleague name or email anywhere in the
+  output.
+- A disabled or archived staff member's feed returns 404 immediately,
+  matching the rule that deactivation revokes access at once.
+- Responses are `private, no-store` and `X-Robots-Tag: noindex` — a feed URL
+  is a bearer credential and must never sit in a shared cache or an index.
+- Regenerating revokes the previous token in the same action, so "replace"
+  genuinely invalidates the old URL rather than leaving two live feeds.
+
+The route had to be added to `PUBLIC_PATHS` in `proxy.ts`. Before that, the
+proxy redirected anonymous calendar clients to `/login?next=/api/calendar/<token>`
+— which not only broke the feature entirely but **placed the token in a query
+string**, where servers, proxies and referrer headers routinely log it.
+
 ### Open redirects
 
 `safeRedirectPath()` (`src/lib/safe-redirect.ts`) constrains every

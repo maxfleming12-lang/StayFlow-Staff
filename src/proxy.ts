@@ -82,6 +82,14 @@ const PUBLIC_PATHS = [
   "/auth",
   "/offline",
   "/install",
+  /**
+   * The iCalendar feed. Apple Calendar, Google Calendar and Outlook
+   * subscribe with no session, so redirecting them to /login makes the
+   * feature impossible — and the redirect put the subscription token into
+   * a `?next=` query string, where servers and proxies log it. The token
+   * is a bearer credential; the route authenticates it itself.
+   */
+  "/api/calendar",
 ];
 
 export const config = {
