@@ -36,10 +36,25 @@ use it like a native app, including offline fallback and push notifications.
 - TypeScript types generated from the live schema
 - **27 RLS tests passing** across five roles — see [SECURITY.md](SECURITY.md)
 
-The UI for rostering, the time clock, timesheets, notifications, dashboards
-and reporting is scaffolded as routes with enforced access and is built in
-later milestones. The application says so on screen rather than showing fake
-data.
+**Milestone 3 — rostering.** Partially complete:
+
+- Roster domain logic: hours, unpaid-break deduction, estimated cost, and a
+  conflict engine (overlap, approved leave, unavailability, minimum rest,
+  cross-property turnaround). 69 unit tests, including both daylight-saving
+  transitions and the 167-hour spring-forward week.
+- Staff roster: today / this week / upcoming, accept and decline. A decline
+  requires a reason and never removes the shift — it raises a manager review
+  item instead.
+- Management roster: weekly grid, week navigation, property filter, week
+  totals, add-shift with conflict warnings and override-with-reason, and
+  per-property publishing that records who published and when, creates
+  acknowledgements and notifies affected staff.
+
+**Not yet built.** These routes exist with access enforced and say so on
+screen rather than showing fake data: leave requests, availability, shift
+replacements, open-shift claiming, copy/duplicate week, roster templates,
+the private iCalendar feed, the time clock, timesheets, push notifications,
+dashboards and reporting.
 
 ---
 

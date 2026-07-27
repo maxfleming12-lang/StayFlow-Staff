@@ -276,6 +276,21 @@ The `FOR ALL` pattern was the most instructive: it appeared on
 scoped SELECT policy next to a loose `FOR ALL` write policy does not scope
 reads — it just adds a second, wider door.
 
+### Defects found after the audit
+
+Four more were found while building the roster, each only because a result
+was checked rather than a success response trusted:
+
+| Defect | Consequence |
+| --- | --- |
+| `service_role` had no grants on any of the 36 tables | Every server-side write failed. Broke roster publishing; would have broken kiosk PIN verification, iCalendar tokens and Web Push identically. Fixed in `0008`. |
+| Only one of four roster queries checked its error | A failed staff query rendered as an empty roster, indistinguishable from having no staff. |
+| `employment_details` referenced `auth.users`, not `profiles` | PostgREST could not infer the relationship, so the embed failed and the roster showed no staff. Fixed in `0007`. |
+| The shift form reset on the conflict re-render | A manager acknowledging a warning about one shift would have saved a different one — an unassigned shift on the wrong day, carrying an override reason documenting a decision they never made. |
+
+Stated plainly: **a successful-looking response is not evidence of a correct
+result.** Every one of these returned without error.
+
 ### What the audit still does NOT establish
 
 - One of the five reviewers (coverage/correctness) died on a spend limit
