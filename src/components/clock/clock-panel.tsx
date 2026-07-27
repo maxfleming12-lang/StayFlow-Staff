@@ -1,17 +1,17 @@
 "use client";
 
 import {
-  useActionState,
   useEffect,
   useRef,
   useState,
   useSyncExternalStore,
+  useTransition,
 } from "react";
-import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Coffee, LogIn, LogOut, Play } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { recordPunch, type ClockActionState } from "@/lib/clock/actions";
+import { useOfflineClock } from "@/lib/clock/use-offline-clock";
 import {
   allowedActions,
   type ClockEventType,
@@ -41,26 +41,28 @@ const STATUS_TEXT: Record<ClockState["status"], string> = {
 function PunchButton({
   action,
   primary,
+  pending,
+  onPress,
 }: {
   action: ClockEventType;
   primary: boolean;
+  pending: boolean;
+  onPress: () => void;
 }) {
-  const { pending } = useFormStatus();
   const Icon = ICONS[action];
   return (
     <Button
-      type="submit"
-      name="eventType"
-      value={action}
+      type="button"
       variant={primary ? "primary" : "outline"}
       disabled={pending}
       aria-busy={pending}
+      onClick={onPress}
       // Deliberately large: this is pressed with a thumb, often in a hurry,
       // sometimes with wet hands after cleaning.
       className="h-14 flex-1 text-base"
     >
       <Icon className="h-5 w-5" aria-hidden="true" />
-      {pending ? "Sending…" : LABELS[action]}
+      {pending ? "Saving…" : LABELS[action]}
     </Button>
   );
 }
@@ -97,16 +99,20 @@ export function ClockPanel({
   propertyId,
   propertyName,
   shiftId,
+  userId,
 }: {
   state: ClockState;
   propertyId: string;
   propertyName: string;
   shiftId: string | null;
+  userId: string;
 }) {
-  const [result, formAction] = useActionState<ClockActionState, FormData>(
-    recordPunch,
-    {},
-  );
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [message, setMessage] = useState<{
+    tone: "success" | "error" | "warning";
+    text: string;
+  } | null>(null);
   // A stable per-device id, so a replayed action from THIS device is
   // recognised as the same action rather than a new one.
   //
@@ -141,7 +147,34 @@ export function ClockPanel({
     () => true,
   );
 
+  const { punch, queuedCount, failed } = useOfflineClock({
+    userId,
+    propertyId,
+    deviceIdRef,
+  });
+
   const actions = allowedActions(state.status);
+
+  const press = (action: ClockEventType) => {
+    setMessage(null);
+    startTransition(async () => {
+      // Queued locally first, so the punch survives the tab closing before
+      // the request finishes. `result` is only non-null when the browser
+      // cannot queue at all and the send happened inline.
+      const result = await punch({ eventType: action, shiftId });
+
+      if (result?.outcome === "rejected") {
+        setMessage({ tone: "error", text: result.error });
+      } else if (!navigator.onLine) {
+        setMessage({
+          tone: "warning",
+          text: "Saved on this device. It will be sent when you have signal.",
+        });
+      }
+      // Re-read the derived state from the server rather than guessing it.
+      router.refresh();
+    });
+  };
 
   return (
     <section
@@ -181,39 +214,47 @@ export function ClockPanel({
         </div>
       )}
 
-      {result.error && (
+      {message && (
         <div className="mt-4">
-          <Alert tone="error">{result.error}</Alert>
+          <Alert tone={message.tone}>{message.text}</Alert>
         </div>
       )}
-      {result.success && (
+
+      {queuedCount > 0 && (
         <div className="mt-4">
-          <Alert tone={result.duplicate ? "warning" : "success"}>
-            {result.success}
+          <Alert tone="warning">
+            {queuedCount === 1
+              ? "1 entry is waiting to be sent."
+              : `${queuedCount} entries are waiting to be sent.`}{" "}
+            They are saved on this device and will go through automatically.
           </Alert>
         </div>
       )}
 
-      <form action={formAction} className="mt-5 flex gap-3">
-        <input type="hidden" name="propertyId" value={propertyId} />
-        <input type="hidden" name="deviceId" ref={deviceIdRef} />
-        <input type="hidden" name="wasOffline" value={String(!online)} />
-        {shiftId && <input type="hidden" name="shiftId" value={shiftId} />}
-        {/* The device's own clock, recorded but never trusted for ordering. */}
-        <input
-          type="hidden"
-          name="clientTime"
-          value={new Date().toISOString()}
-        />
+      {failed.length > 0 && (
+        <div className="mt-4">
+          <Alert tone="error" title="Some entries could not be sent">
+            {failed.length === 1 ? "An entry" : `${failed.length} entries`} could
+            not be recorded. Tell your manager so your hours can be corrected.
+          </Alert>
+        </div>
+      )}
 
+      {/* The device id is stamped into a hidden field by the effect above and
+          read back when queuing, so it survives without a re-render. */}
+      <input type="hidden" ref={deviceIdRef} />
+
+      <div className="mt-5 flex gap-3">
         {actions.map((action, index) => (
           <PunchButton
             key={action}
             action={action}
             primary={index === actions.length - 1}
+            pending={isPending}
+            onPress={() => press(action)}
           />
         ))}
-      </form>
+      </div>
 
       <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
         Times are recorded by StayFlow&rsquo;s server, not your phone, so a

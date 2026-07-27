@@ -85,6 +85,7 @@ export default async function ClockPage() {
           propertyId={propertyId}
           propertyName={propertyName}
           shiftId={(todayShift?.id as string | undefined) ?? null}
+          userId={user.id}
         />
       ) : (
         <Alert tone="warning" title="No property assigned">
