@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   estimatedCost,
+  hospitalityCasualEstimatedCost,
   paidHours,
   spanHours,
   totalPaidHours,
@@ -108,6 +109,34 @@ describe("estimatedCost", () => {
     // to show "unknown".
     expect(estimatedCost(shift, null)).toBeNull();
     expect(estimatedCost(shift, undefined)).toBeNull();
+  });
+});
+
+describe("hospitalityCasualEstimatedCost", () => {
+  it("uses the base casual rate Monday to Friday", () => {
+    expect(
+      hospitalityCasualEstimatedCost(
+        {
+          startsAt: syd("2026-08-07T09:00:00+10:00"),
+          endsAt: syd("2026-08-07T11:00:00+10:00"),
+        },
+        33.05,
+      ),
+    ).toBe(66.1);
+  });
+
+  it("applies the Hospitality Award casual Saturday and Sunday rates", () => {
+    const saturday = {
+      startsAt: syd("2026-08-08T09:00:00+10:00"),
+      endsAt: syd("2026-08-08T11:00:00+10:00"),
+    };
+    const sunday = {
+      startsAt: syd("2026-08-09T09:00:00+10:00"),
+      endsAt: syd("2026-08-09T11:00:00+10:00"),
+    };
+
+    expect(hospitalityCasualEstimatedCost(saturday, 33.05)).toBe(79.32);
+    expect(hospitalityCasualEstimatedCost(sunday, 33.05)).toBe(92.54);
   });
 });
 

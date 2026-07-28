@@ -1,9 +1,9 @@
 /**
  * Shift duration and labour cost arithmetic.
  *
- * Everything here produces an ESTIMATE. StayFlow does not interpret awards,
- * penalty rates, loadings or overtime, and nothing in this module should be
- * presented to a user without saying so.
+ * Everything here produces an ESTIMATE. StayFlow applies the configured
+ * Hospitality Award casual weekend multipliers, but does not calculate other
+ * penalties, loadings, overtime or allowances.
  */
 
 /** A break within a shift. */
@@ -67,6 +67,29 @@ export function estimatedCost(
 ): number | null {
   if (hourlyRate == null || Number.isNaN(hourlyRate)) return null;
   return round2(paidHours(shift) * hourlyRate);
+}
+
+/**
+ * Hospitality Award MA000009 casual estimate.
+ *
+ * The stored hourly rate is the casual weekday rate. Casual weekend rates are
+ * 120% on Saturday and 140% on Sunday. The shift's local starting day selects
+ * the multiplier; StayFlow's current roster shifts do not span multiple days.
+ */
+export function hospitalityCasualEstimatedCost(
+  shift: ShiftLike,
+  hourlyRate: number | null | undefined,
+  timeZone = "Australia/Sydney",
+): number | null {
+  if (hourlyRate == null || Number.isNaN(hourlyRate)) return null;
+
+  const weekday = new Intl.DateTimeFormat("en-AU", {
+    weekday: "short",
+    timeZone,
+  }).format(toDate(shift.startsAt));
+  const multiplier = weekday === "Sat" ? 1.2 : weekday === "Sun" ? 1.4 : 1;
+
+  return round2(paidHours(shift) * hourlyRate * multiplier);
 }
 
 /** Sum paid hours across many shifts. */

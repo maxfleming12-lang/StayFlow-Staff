@@ -11,7 +11,7 @@ import {
   weekStart,
 } from "@/lib/roster/week";
 import { formatCurrency, formatHours } from "@/lib/format";
-import { estimatedCost } from "@/lib/roster/hours";
+import { hospitalityCasualEstimatedCost } from "@/lib/roster/hours";
 import { RosterGrid } from "@/components/roster/roster-grid";
 import { PublishRoster } from "@/components/roster/publish-roster";
 import { ShiftForm } from "@/components/roster/shift-form";
@@ -55,7 +55,7 @@ export default async function ManageRosterPage({
   let missingRates = 0;
   for (const shift of roster.shifts) {
     const rate = shift.userId ? rateFor.get(shift.userId) : null;
-    const cost = estimatedCost(shift, rate ?? null);
+    const cost = hospitalityCasualEstimatedCost(shift, rate ?? null);
     if (cost == null) missingRates += 1;
     else knownCost += cost;
   }
@@ -204,9 +204,10 @@ export default async function ManageRosterPage({
 
       {showCost && (
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          Labour cost is an estimate from rostered hours and base pay rates
-          only. It excludes penalty rates, loadings, overtime and allowances,
-          and is not an award interpretation.
+          Labour cost is an estimate using the configured casual base rates
+          with Hospitality Award Saturday and Sunday multipliers. It excludes
+          other penalties, loadings, overtime and allowances, and is not an
+          award interpretation.
         </p>
       )}
     </div>
