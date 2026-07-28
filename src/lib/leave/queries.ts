@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { weekRange } from "@/lib/roster/week";
+import { addIsoDays, startOfLocalDay } from "@/lib/format";
 import type { Database } from "@/types/database";
 
 /** The leave_status enum, straight from the generated schema types. */
@@ -145,16 +145,20 @@ export async function getLeaveForReview(
     requests[0].lastDate,
   );
 
-  const { fromIso } = weekRange(earliest);
-  const to = new Date(`${latest}T23:59:59`);
+  // Half-open [from, until) across the property's local days. `${latest}
+  // T23:59:59` was parsed against the host clock, so on a UTC server the
+  // window ran ten hours past the intended end of the last leave day — and
+  // would have fallen short of it on a negative-offset host.
+  const from = startOfLocalDay(earliest);
+  const until = startOfLocalDay(addIsoDays(latest, 1));
 
   const { data: shifts, error: shiftError } = await supabase
     .from("shifts")
     .select(
       "id, user_id, starts_at, ends_at, properties!shifts_property_id_fkey ( name )",
     )
-    .gte("starts_at", fromIso)
-    .lte("starts_at", to.toISOString())
+    .gte("starts_at", from)
+    .lt("starts_at", until)
     .eq("status", "published")
     .is("archived_at", null);
 

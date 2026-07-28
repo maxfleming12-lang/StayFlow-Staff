@@ -337,6 +337,62 @@ describe("submitted unavailability", () => {
     );
     expect(conflicts).toEqual([]);
   });
+
+  it("reads time-bounded unavailability as property-local, not host-local", () => {
+    // 08:00–12:00 unavailable overlaps a 09:00–17:00 shift. Parsed against the
+    // host clock instead of the property timezone, this window landed in the
+    // Sydney evening on a UTC server and the clash went unreported.
+    const clashing = findConflicts(
+      shift(),
+      baseContext({
+        availability: [
+          {
+            dayOfWeek: 3,
+            specificDate: null,
+            startTime: "08:00",
+            endTime: "12:00",
+            isAvailable: false,
+          },
+        ],
+      }),
+    );
+    expect(clashing.map((c) => c.kind)).toContain("unavailable");
+
+    // 19:00–23:00 genuinely does not overlap that shift.
+    const clear = findConflicts(
+      shift(),
+      baseContext({
+        availability: [
+          {
+            dayOfWeek: 3,
+            specificDate: null,
+            startTime: "19:00",
+            endTime: "23:00",
+            isAvailable: false,
+          },
+        ],
+      }),
+    );
+    expect(clear.map((c) => c.kind)).not.toContain("unavailable");
+  });
+
+  it("accepts the seconds form Postgres time columns return", () => {
+    const conflicts = findConflicts(
+      shift(),
+      baseContext({
+        availability: [
+          {
+            dayOfWeek: 3,
+            specificDate: null,
+            startTime: "08:00:00",
+            endTime: "12:00:00",
+            isAvailable: false,
+          },
+        ],
+      }),
+    );
+    expect(conflicts.map((c) => c.kind)).toContain("unavailable");
+  });
 });
 
 describe("requiresOverride", () => {

@@ -1,6 +1,6 @@
 import { TZDate } from "@date-fns/tz";
 import { DEFAULT_TIMEZONE } from "@/lib/format";
-import { parseIsoDate, weekDates } from "./week";
+import { localDateTimeToIso, parseIsoDate, weekDates } from "./week";
 
 /**
  * Copying shifts from one week to another.
@@ -56,12 +56,10 @@ function fromLocal(
   timeZone: string,
 ): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  const zoned = new TZDate(
+  return localDateTimeToIso(
     `${date}T${pad(hour)}:${pad(minute)}:${pad(second)}`,
     timeZone,
   );
-  // Normalise to UTC so the value is unambiguous wherever it is logged.
-  return new Date(zoned.getTime()).toISOString();
 }
 
 /**

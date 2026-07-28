@@ -1,6 +1,6 @@
 import { TZDate } from "@date-fns/tz";
 import { addDays, format, startOfWeek } from "date-fns";
-import { DEFAULT_TIMEZONE } from "@/lib/format";
+import { DEFAULT_TIMEZONE, localDateTimeToIso } from "@/lib/format";
 
 /**
  * Roster week arithmetic.
@@ -44,29 +44,18 @@ export function weekRange(
   weekStartDate: string,
   timeZone: string = DEFAULT_TIMEZONE,
 ): { fromIso: string; toIso: string } {
-  const from = new TZDate(`${weekStartDate}T00:00:00`, timeZone);
-  const to = new TZDate(`${shiftWeek(weekStartDate, 1)}T00:00:00`, timeZone);
-
-  // TZDate.toISOString() keeps the offset form ("…+10:00"). That is the same
-  // instant, but normalising to UTC makes these values unambiguous wherever
-  // they are logged, compared or pasted into a query.
   return {
-    fromIso: new Date(from.getTime()).toISOString(),
-    toIso: new Date(to.getTime()).toISOString(),
+    fromIso: localDateTimeToIso(`${weekStartDate}T00:00`, timeZone),
+    toIso: localDateTimeToIso(`${shiftWeek(weekStartDate, 1)}T00:00`, timeZone),
   };
 }
 
 /**
- * Convert a timezone-less datetime-local value entered at a property into an
- * unambiguous UTC instant.
+ * Re-exported because the roster modules are its main callers, but it lives
+ * in `@/lib/format` — leave and timesheet code needs it too and must not
+ * reach into the roster library for it.
  */
-export function localDateTimeToIso(
-  localDateTime: string,
-  timeZone: string = DEFAULT_TIMEZONE,
-): string {
-  const zoned = new TZDate(localDateTime, timeZone);
-  return new Date(zoned.getTime()).toISOString();
-}
+export { localDateTimeToIso };
 
 /** "3–9 August 2026", collapsing a shared month. */
 export function formatWeekLabel(weekStartDate: string): string {

@@ -22,6 +22,25 @@ describe("localDateTimeToIso", () => {
       "2026-01-19T22:00:00.000Z",
     );
   });
+
+  it("ignores the host clock", () => {
+    // The whole point of the helper. This assertion only bites when the test
+    // runner's TZ differs from the property timezone, which is why vitest
+    // pins TZ=UTC — on a Sydney laptop a broken conversion still looks right.
+    expect(localDateTimeToIso("2026-07-28T09:00", "Australia/Sydney")).toBe(
+      localDateTimeToIso("2026-07-27T23:00", "UTC"),
+    );
+  });
+
+  it("accepts optional seconds", () => {
+    expect(localDateTimeToIso("2026-07-28T09:00:30")).toBe(
+      "2026-07-27T23:00:30.000Z",
+    );
+  });
+
+  it("rejects a value it cannot read rather than returning Invalid Date", () => {
+    expect(() => localDateTimeToIso("28/07/2026 9am")).toThrow(RangeError);
+  });
 });
 
 describe("weekStart", () => {
