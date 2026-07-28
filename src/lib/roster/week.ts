@@ -56,6 +56,18 @@ export function weekRange(
   };
 }
 
+/**
+ * Convert a timezone-less datetime-local value entered at a property into an
+ * unambiguous UTC instant.
+ */
+export function localDateTimeToIso(
+  localDateTime: string,
+  timeZone: string = DEFAULT_TIMEZONE,
+): string {
+  const zoned = new TZDate(localDateTime, timeZone);
+  return new Date(zoned.getTime()).toISOString();
+}
+
 /** "3–9 August 2026", collapsing a shared month. */
 export function formatWeekLabel(weekStartDate: string): string {
   const start = parseIsoDate(weekStartDate);

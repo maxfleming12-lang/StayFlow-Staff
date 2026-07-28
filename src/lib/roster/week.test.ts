@@ -2,12 +2,27 @@ import { describe, expect, it } from "vitest";
 import {
   formatDayHeading,
   formatWeekLabel,
+  localDateTimeToIso,
   parseIsoDate,
   shiftWeek,
   weekDates,
   weekRange,
   weekStart,
 } from "./week";
+
+describe("localDateTimeToIso", () => {
+  it("treats a winter datetime-local value as Sydney wall-clock time", () => {
+    expect(localDateTimeToIso("2026-07-28T09:00")).toBe(
+      "2026-07-27T23:00:00.000Z",
+    );
+  });
+
+  it("uses Sydney daylight-saving time in summer", () => {
+    expect(localDateTimeToIso("2026-01-20T09:00")).toBe(
+      "2026-01-19T22:00:00.000Z",
+    );
+  });
+});
 
 describe("weekStart", () => {
   it("returns the Monday of the containing week", () => {

@@ -2,6 +2,7 @@ import { formatDayHeading, isToday } from "@/lib/roster/week";
 import { formatHours, formatTime } from "@/lib/format";
 import type { RosterProperty, RosterShift, RosterStaff } from "@/lib/roster/manager-queries";
 import { cn } from "@/lib/utils";
+import { AssignOpenShift } from "./assign-open-shift";
 
 /** ISO date key of a shift in the property timezone. */
 function dayKeyOf(startsAt: string): string {
@@ -207,6 +208,7 @@ export function RosterGrid({
                     {shift.propertyName}
                     {shift.requiredRole && ` · ${shift.requiredRole}`}
                   </p>
+                  <AssignOpenShift shiftId={shift.id} staff={staff} />
                 </div>
               </li>
             ))}

@@ -7,6 +7,7 @@ import { notify } from "@/lib/notifications/deliver";
 import { requireRole } from "@/lib/auth/session";
 import { findConflicts, requiresOverride, type Conflict } from "./conflicts";
 import { getConflictContext } from "./manager-queries";
+import { localDateTimeToIso } from "./week";
 
 /** Result of a roster mutation. */
 export interface RosterActionState {
@@ -112,6 +113,8 @@ export async function saveShift(
   }
 
   const input = parsed.data;
+  const startsAtIso = localDateTimeToIso(input.startsAt);
+  const endsAtIso = localDateTimeToIso(input.endsAt);
 
   // Echoed back on every return path so the form can restore itself.
   const values = {
@@ -128,14 +131,14 @@ export async function saveShift(
     let conflicts: Conflict[] = [];
 
     if (input.userId) {
-      const context = await getConflictContext(input.userId, input.startsAt);
+      const context = await getConflictContext(input.userId, startsAtIso);
       conflicts = findConflicts(
         {
           id: input.shiftId,
           userId: input.userId,
           propertyId: input.propertyId,
-          startsAt: input.startsAt,
-          endsAt: input.endsAt,
+          startsAt: startsAtIso,
+          endsAt: endsAtIso,
         },
         { ...context, crossPropertyMinimumHours: 12 },
       );
@@ -156,8 +159,8 @@ export async function saveShift(
       organisation_id: user.organisationId,
       property_id: input.propertyId,
       user_id: input.userId,
-      starts_at: new Date(input.startsAt).toISOString(),
-      ends_at: new Date(input.endsAt).toISOString(),
+      starts_at: startsAtIso,
+      ends_at: endsAtIso,
       notes: input.notes ?? null,
       required_role: input.requiredRole ?? null,
       is_open_shift: input.userId === null,
@@ -234,6 +237,116 @@ export async function deleteShift(shiftId: string): Promise<RosterActionState> {
 
   revalidatePath("/manage/roster");
   return { success: "Shift removed." };
+}
+
+const assignShiftSchema = z.object({
+  shiftId: z.string().uuid(),
+  userId: z.string().uuid("Choose a staff member."),
+});
+
+/**
+ * Assign an existing open shift without making the manager recreate it.
+ * Published shifts remain published and notify the newly rostered person.
+ */
+export async function assignOpenShift(
+  _prev: RosterActionState,
+  formData: FormData,
+): Promise<RosterActionState> {
+  const user = await requireRole("manager");
+  const parsed = assignShiftSchema.safeParse({
+    shiftId: formData.get("shiftId"),
+    userId: formData.get("userId"),
+  });
+
+  if (!parsed.success) {
+    return {
+      fieldErrors: { userId: "Choose a staff member." },
+      error: "Choose a staff member.",
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const { data: shift, error: shiftError } = await supabase
+      .from("shifts")
+      .select("id, property_id, starts_at, ends_at, status, user_id")
+      .eq("id", parsed.data.shiftId)
+      .is("archived_at", null)
+      .maybeSingle();
+
+    if (shiftError || !shift) {
+      return { error: "That shift could not be found." };
+    }
+    if (shift.user_id) {
+      return { error: "That shift has already been assigned." };
+    }
+
+    const context = await getConflictContext(
+      parsed.data.userId,
+      String(shift.starts_at),
+    );
+    const conflicts = findConflicts(
+      {
+        id: parsed.data.shiftId,
+        userId: parsed.data.userId,
+        propertyId: String(shift.property_id),
+        startsAt: String(shift.starts_at),
+        endsAt: String(shift.ends_at),
+      },
+      { ...context, crossPropertyMinimumHours: 12 },
+    );
+
+    if (requiresOverride(conflicts)) {
+      return {
+        error:
+          "This person has a roster conflict. Use Add shift to review the warnings before assigning them.",
+        conflicts,
+      };
+    }
+
+    const { data: updated, error: updateError } = await supabase
+      .from("shifts")
+      .update({ user_id: parsed.data.userId, is_open_shift: false })
+      .eq("id", parsed.data.shiftId)
+      .is("user_id", null)
+      .select("id")
+      .maybeSingle();
+
+    if (updateError || !updated) {
+      return {
+        error:
+          updateError?.message ?? "That shift was assigned by someone else.",
+      };
+    }
+
+    if (shift.status === "published") {
+      await supabase.from("shift_acknowledgements").upsert(
+        {
+          organisation_id: user.organisationId,
+          shift_id: parsed.data.shiftId,
+          user_id: parsed.data.userId,
+          status: "pending",
+        },
+        { onConflict: "shift_id,user_id" },
+      );
+
+      await notify({
+        organisationId: user.organisationId,
+        propertyId: String(shift.property_id),
+        userIds: [parsed.data.userId],
+        category: "roster_published",
+        title: "New shift assigned",
+        body: "A shift has been added to your roster.",
+        deepLink: "/roster",
+      });
+    }
+
+    revalidatePath("/manage/roster");
+    revalidatePath("/roster");
+    return { success: "Shift assigned." };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
 }
 
 const publishSchema = z.object({
