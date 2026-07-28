@@ -239,6 +239,118 @@ export async function deleteShift(shiftId: string): Promise<RosterActionState> {
   return { success: "Shift removed." };
 }
 
+const removeShiftSchema = z.object({
+  shiftId: z.string().uuid(),
+});
+
+/**
+ * Remove a single shift that nobody is relying on.
+ *
+ * Soft delete, like everything else here — attendance and audit history
+ * reference shifts, so the row stays and `archived_at` is set.
+ *
+ * Two kinds qualify, and only these two:
+ *
+ *   * UNFILLED — nobody holds it, so nobody loses a shift. True whether it
+ *     is draft or published.
+ *   * DRAFT — staff cannot see draft shifts at all (`shifts_select_self`
+ *     requires `status = 'published'`), so nothing has been communicated
+ *     yet, assigned or not.
+ *
+ * A published, assigned shift is refused: the person rostered on has been
+ * notified and may have arranged their week around it. Removing that is a
+ * different, louder operation than this one.
+ *
+ * The eligibility test is repeated in the WHERE clause of the write so the
+ * DATABASE settles the race. The grid renders on the server, so between the
+ * page rendering and the manager clicking, a shift may have been assigned,
+ * published or removed by someone else; checking first and then writing
+ * would leave a window in which a live shift is archived out from under the
+ * person rostered on it.
+ */
+export async function removeShift(
+  _prev: RosterActionState,
+  formData: FormData,
+): Promise<RosterActionState> {
+  await requireRole("manager");
+
+  const parsed = removeShiftSchema.safeParse({
+    shiftId: formData.get("shiftId"),
+  });
+  if (!parsed.success) return { error: "That shift could not be identified." };
+
+  try {
+    const supabase = await createClient();
+
+    const { data: shift, error: readError } = await supabase
+      .from("shifts")
+      .select("id, user_id, status, archived_at")
+      .eq("id", parsed.data.shiftId)
+      .maybeSingle();
+
+    if (readError) return { error: "Could not read that shift." };
+    if (!shift) return { error: "That shift could not be found." };
+    if (shift.archived_at) return { error: "That shift has already been removed." };
+
+    const unfilled = shift.user_id === null;
+    const draft = shift.status === "draft";
+
+    if (!unfilled && !draft) {
+      return {
+        error:
+          "This shift is published and assigned, so it cannot be removed here — the person rostered on has already been told about it.",
+      };
+    }
+
+    // A claim means a real person is waiting on an answer. Removing the shift
+    // would drop their request silently, so say so and let the manager
+    // decline it deliberately instead.
+    if (unfilled) {
+      const { data: claimed } = await supabase
+        .from("open_shift_offers")
+        .select("id")
+        .eq("shift_id", parsed.data.shiftId)
+        .eq("status", "claimed")
+        .limit(1)
+        .maybeSingle();
+
+      if (claimed) {
+        return {
+          error:
+            "Somebody has claimed this shift. Decline their claim first, then remove it.",
+        };
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("shifts")
+      .update({ archived_at: new Date().toISOString() })
+      .eq("id", parsed.data.shiftId)
+      .is("archived_at", null)
+      .or("user_id.is.null,status.eq.draft")
+      .select("id")
+      .maybeSingle();
+
+    if (error) return { error: "Could not remove the shift." };
+    if (!data) {
+      // Nothing matched, so the shift changed under us between the read and
+      // the write — it was assigned and published, or already removed.
+      return {
+        error:
+          "That shift changed while you were looking at it. Refresh to see the current roster.",
+      };
+    }
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
+
+  revalidatePath("/manage/roster");
+  revalidatePath("/roster");
+  // A published unfilled shift is listed for staff to pick up.
+  revalidatePath("/available-shifts");
+  return { success: "Shift removed." };
+}
+
 const clearWeekSchema = z.object({
   weekStartDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid week."),
   propertyId: z.union([z.string().uuid(), z.literal("")]).optional(),

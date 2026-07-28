@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { addIsoDays, startOfLocalDay } from "@/lib/format";
+import { addIsoDays, localDateTimeToIso, startOfLocalDay } from "@/lib/format";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import { notify } from "@/lib/notifications/deliver";
 import type { ClockEvent, ClockEventType } from "@/lib/clock/state";
@@ -15,6 +15,24 @@ type TimesheetInsert = Database["public"]["Tables"]["timesheets"]["Insert"];
 export interface TimesheetActionState {
   error?: string;
   success?: string;
+  fieldErrors?: Record<string, string>;
+  /** True when the caller must resubmit confirming a duplicate day. */
+  needsConfirmation?: boolean;
+  /**
+   * Values echoed back so a rejected manual entry can restore itself.
+   * Uncontrolled inputs reset to their defaults on re-render otherwise, and
+   * a manager would silently save a different day than the one they were
+   * warned about — the same trap `saveShift` documents.
+   */
+  values?: {
+    propertyId?: string;
+    userId?: string;
+    workDate?: string;
+    startTime?: string;
+    endTime?: string;
+    breakMinutes?: string;
+    managerNote?: string;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -192,6 +210,173 @@ export async function generateTimesheets(
   } catch {
     return { error: "Cannot reach StayFlow right now. Try again shortly." };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Entering hours by hand                                              */
+/* ------------------------------------------------------------------ */
+
+const manualSchema = z.object({
+  propertyId: z.string().uuid("Choose a property."),
+  userId: z.string().uuid("Choose a staff member."),
+  workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose the date worked."),
+  startTime: z.string().regex(/^\d{2}:\d{2}$/, "Enter a start time."),
+  endTime: z.string().regex(/^\d{2}:\d{2}$/, "Enter a finish time."),
+  breakMinutes: z.number().int().min(0).max(600),
+  managerNote: z.string().trim().max(500).optional(),
+  confirmDuplicate: z.boolean().optional(),
+});
+
+/** Round to cents-of-an-hour, the precision `paid_hours` stores. */
+function round2(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * Record hours by hand, for when the clock was not used.
+ *
+ * Motels need this constantly: someone works a shift on a phone with a flat
+ * battery, covers at short notice before being rostered, or the tablet at
+ * reception is down. Without it the only route to a timesheet is
+ * `generateTimesheets`, which can only ever reflect what the clock captured.
+ *
+ * The entry lands as `submitted`, exactly where a generated one lands, so it
+ * flows through the same review, approval and export path rather than
+ * becoming a second kind of timesheet.
+ *
+ * Times are wall-clock at the property and are resolved through
+ * `localDateTimeToIso`; a finish at or before the start is read as an
+ * overnight shift ending the following day, which is how night audit is
+ * actually worked.
+ */
+export async function createManualTimesheet(
+  _prev: TimesheetActionState,
+  formData: FormData,
+): Promise<TimesheetActionState> {
+  const user = await requireRole("manager");
+
+  const breakRaw = formData.get("breakMinutes");
+  const values = {
+    propertyId: (formData.get("propertyId") as string) ?? "",
+    userId: (formData.get("userId") as string) ?? "",
+    workDate: (formData.get("workDate") as string) ?? "",
+    startTime: (formData.get("startTime") as string) ?? "",
+    endTime: (formData.get("endTime") as string) ?? "",
+    breakMinutes: (breakRaw as string) ?? "",
+    managerNote: (formData.get("managerNote") as string) ?? "",
+  };
+
+  const parsed = manualSchema.safeParse({
+    propertyId: formData.get("propertyId"),
+    userId: formData.get("userId"),
+    workDate: formData.get("workDate"),
+    startTime: formData.get("startTime"),
+    endTime: formData.get("endTime"),
+    breakMinutes: breakRaw ? Number(breakRaw) : 0,
+    managerNote: (formData.get("managerNote") as string) || undefined,
+    confirmDuplicate: formData.get("confirmDuplicate") === "on",
+  });
+
+  if (!parsed.success) {
+    const fieldErrors: Record<string, string> = {};
+    for (const issue of parsed.error.issues) {
+      const key = String(issue.path[0] ?? "form");
+      fieldErrors[key] ??= issue.message;
+    }
+    return { fieldErrors, error: "Check the highlighted fields.", values };
+  }
+
+  const input = parsed.data;
+
+  const startIso = localDateTimeToIso(`${input.workDate}T${input.startTime}`);
+  // A finish at or before the start means the shift ran past midnight.
+  const endsNextDay = input.endTime <= input.startTime;
+  const endIso = localDateTimeToIso(
+    `${endsNextDay ? addIsoDays(input.workDate, 1) : input.workDate}T${input.endTime}`,
+  );
+
+  const workedHours =
+    (Date.parse(endIso) - Date.parse(startIso)) / 3_600_000 -
+    input.breakMinutes / 60;
+
+  if (workedHours <= 0) {
+    return {
+      fieldErrors: {
+        breakMinutes: "The break is longer than the shift.",
+      },
+      error: "That leaves no paid time. Check the times and the break.",
+      values,
+    };
+  }
+  if (workedHours > 16) {
+    return {
+      fieldErrors: { endTime: "That is more than 16 hours." },
+      error:
+        "That is longer than any single shift should be. Check the finish time — for an overnight shift, enter the date it started.",
+      values,
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+
+    // Warn once about a second entry for the same person and day, rather than
+    // refusing: split shifts and second properties are both ordinary. The
+    // unique index is (user_id, work_date, shift_id) and manual rows carry a
+    // NULL shift_id, which Postgres treats as always distinct — so nothing
+    // downstream would catch an accidental double entry.
+    if (!input.confirmDuplicate) {
+      const { data: existing } = await supabase
+        .from("timesheets")
+        .select("id")
+        .eq("user_id", input.userId)
+        .eq("work_date", input.workDate)
+        .limit(1)
+        .maybeSingle();
+
+      if (existing) {
+        return {
+          needsConfirmation: true,
+          values,
+          error:
+            "There is already a timesheet for this person on this date. Confirm below if you meant to add a second one.",
+        };
+      }
+    }
+
+    const { error } = await supabase.from("timesheets").insert({
+      organisation_id: user.organisationId,
+      property_id: input.propertyId,
+      user_id: input.userId,
+      shift_id: null,
+      work_date: input.workDate,
+      actual_start: startIso,
+      actual_end: endIso,
+      break_minutes: input.breakMinutes,
+      paid_hours: round2(workedHours),
+      // No rostered window to compare against, so there is no variance to
+      // report. Leaving it null is honest; zero would read as "matched".
+      variance_hours: null,
+      is_no_show: false,
+      status: "submitted" as const,
+      pay_period_start: input.workDate,
+      pay_period_end: endsNextDay
+        ? addIsoDays(input.workDate, 1)
+        : input.workDate,
+      manager_note: input.managerNote ?? null,
+      created_by: user.id,
+    });
+
+    if (error) return { error: `Could not save the hours: ${error.message}`, values };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly.", values };
+  }
+
+  revalidatePath("/manage/timesheets");
+  revalidatePath("/timesheets");
+  return {
+    success: `Recorded ${round2(workedHours)} h for ${input.workDate}.`,
+  };
 }
 
 /* ------------------------------------------------------------------ */
