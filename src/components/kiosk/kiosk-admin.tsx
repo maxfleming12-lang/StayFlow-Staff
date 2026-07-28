@@ -216,13 +216,15 @@ export function KioskAdmin({
           <Field
             label="New PIN"
             htmlFor="pin-value"
-            hint="4 to 10 digits. Tell them in person — it cannot be looked up afterwards."
+            hint="Exactly 6 digits. Tell them in person — it cannot be looked up afterwards."
           >
             <Input
               id="pin-value"
               name="pin"
               inputMode="numeric"
-              pattern="[0-9]{4,10}"
+              pattern="[0-9]{6}"
+              minLength={6}
+              maxLength={6}
               required
               autoComplete="off"
             />

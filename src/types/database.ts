@@ -2485,6 +2485,10 @@ export type Database = {
       }
       manages_user: { Args: { target_user_id: string }; Returns: boolean }
       redact_sensitive: { Args: { payload: Json }; Returns: Json }
+      resolve_kiosk_user: {
+        Args: { p_pin: string; p_property: string }
+        Returns: string | null
+      }
       set_kiosk_pin: {
         Args: { p_pin: string; p_user: string }
         Returns: undefined
@@ -2828,4 +2832,3 @@ export const Constants = {
     },
   },
 } as const
-

@@ -11,6 +11,7 @@ export interface TeamMember {
   role: string;
   isActive: boolean;
   propertyNames: string[];
+  isKioskOnly: boolean;
 }
 
 /**
@@ -85,6 +86,7 @@ export async function getTeam(): Promise<TeamMember[]> {
       role: roleByUser.get(String(p.id)) ?? "staff",
       isActive: Boolean(p.is_active),
       propertyNames: propertiesByUser.get(String(p.id)) ?? [],
+      isKioskOnly: String(p.email ?? "").endsWith("@staff.stayflow.invalid"),
     };
   });
 }

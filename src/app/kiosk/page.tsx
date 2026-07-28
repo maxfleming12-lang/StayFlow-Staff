@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getKioskSession, getKioskStaff } from "@/lib/kiosk/session";
+import { getKioskSession } from "@/lib/kiosk/session";
 import { KioskClock } from "@/components/kiosk/kiosk-clock";
 import { Alert } from "@/components/ui/alert";
 
@@ -38,8 +38,6 @@ export default async function KioskPage({
     );
   }
 
-  const staff = await getKioskStaff(session);
-
   return (
     <main className="mx-auto min-h-dvh max-w-md p-5">
       <header className="py-4 text-center">
@@ -48,7 +46,7 @@ export default async function KioskPage({
         </h1>
       </header>
 
-      <KioskClock staff={staff} propertyName={session.propertyName} />
+      <KioskClock propertyName={session.propertyName} />
 
       <p className="mt-8 text-center text-xs text-slate-500 dark:text-slate-400">
         Times are recorded by StayFlow&rsquo;s server. Your PIN clocks only

@@ -2,25 +2,26 @@
 
 import { useActionState, useState, useTransition } from "react";
 import { useFormStatus } from "react-dom";
-import { Check, Copy, UserPlus } from "lucide-react";
+import { UserPlus } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/field";
 import {
-  inviteStaff,
+  addBasicStaff,
   sendPasswordReset,
   setStaffActive,
+  updateBasicStaff,
   type TeamActionState,
 } from "@/lib/team/actions";
 import type { TeamMember } from "@/lib/team/queries";
 import { ROLE_LABEL } from "@/lib/auth/roles";
 import type { Role } from "@/lib/auth/roles";
 
-function SubmitButton() {
+function SubmitButton({ label = "Add staff" }: { label?: string }) {
   const { pending } = useFormStatus();
   return (
     <Button type="submit" disabled={pending} aria-busy={pending}>
-      {pending ? "Creating…" : "Create account"}
+      {pending ? "Saving…" : label}
     </Button>
   );
 }
@@ -41,14 +42,18 @@ export function TeamManager({
   canManage: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, startTransition] = useTransition();
   const [message, setMessage] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
   const [state, formAction] = useActionState<TeamActionState, FormData>(
-    inviteStaff,
+    addBasicStaff,
+    {},
+  );
+  const [editState, editAction] = useActionState<TeamActionState, FormData>(
+    updateBasicStaff,
     {},
   );
 
@@ -65,56 +70,109 @@ export function TeamManager({
       );
     });
 
-  const copyPassword = async () => {
-    if (!state.temporaryPassword) return;
-    try {
-      await navigator.clipboard.writeText(state.temporaryPassword);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // The password is on screen regardless; copying is a convenience.
-    }
-  };
-
   const row = (member: TeamMember) => (
     <li
       key={member.id}
-      className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"
+      className="border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"
     >
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
-          {member.displayName}
-          {member.displayName !== member.fullName && (
-            <span className="font-normal text-slate-500"> ({member.fullName})</span>
-          )}
-        </p>
-        <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-          {ROLE_LABEL[member.role as Role] ?? member.role}
-          {member.jobTitle && ` · ${member.jobTitle}`}
-          {member.propertyNames.length > 0 &&
-            ` · ${member.propertyNames.join(", ")}`}
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+            {member.displayName}
+          </p>
+          <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+            {ROLE_LABEL[member.role as Role] ?? member.role}
+            {member.jobTitle && ` · ${member.jobTitle}`}
+            {member.propertyNames.length > 0 &&
+              ` · ${member.propertyNames.join(", ")}`}
+          </p>
+        </div>
+
+        {canManage && (
+          <div className="flex gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                setEditingId(editingId === member.id ? null : member.id)
+              }
+            >
+              Edit
+            </Button>
+            {!member.isKioskOnly && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => run(() => sendPasswordReset(member.email))}
+              >
+                Reset password
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => run(() => setStaffActive(member.id, !member.isActive))}
+            >
+              {member.isActive ? "Deactivate" : "Reactivate"}
+            </Button>
+          </div>
+        )}
       </div>
 
-      {canManage && (
-        <div className="flex gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => run(() => sendPasswordReset(member.email))}
-          >
-            Reset password
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => run(() => setStaffActive(member.id, !member.isActive))}
-          >
-            {member.isActive ? "Deactivate" : "Reactivate"}
-          </Button>
-        </div>
+      {editingId === member.id && (
+        <form action={editAction} className="mt-4 space-y-3 rounded-lg bg-slate-50 p-3 dark:bg-slate-800">
+          <input type="hidden" name="userId" value={member.id} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Name" htmlFor={`edit-name-${member.id}`}>
+              <Input
+                id={`edit-name-${member.id}`}
+                name="name"
+                defaultValue={member.displayName}
+                required
+              />
+            </Field>
+            <Field label="Hired for" htmlFor={`edit-job-${member.id}`}>
+              <Input
+                id={`edit-job-${member.id}`}
+                name="jobTitle"
+                defaultValue={member.jobTitle ?? ""}
+                required
+              />
+            </Field>
+            <Field
+              label="New 6-digit code"
+              htmlFor={`edit-pin-${member.id}`}
+              hint="Leave blank to keep the current code."
+            >
+              <Input
+                id={`edit-pin-${member.id}`}
+                name="pin"
+                type="password"
+                inputMode="numeric"
+                pattern="[0-9]{6}"
+                minLength={6}
+                maxLength={6}
+                autoComplete="new-password"
+              />
+            </Field>
+          </div>
+          {editState.error && <Alert tone="error">{editState.error}</Alert>}
+          {editState.success && (
+            <Alert tone="success">{editState.success}</Alert>
+          )}
+          <div className="flex gap-2">
+            <SubmitButton label="Save changes" />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEditingId(null)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
       )}
     </li>
   );
@@ -123,28 +181,7 @@ export function TeamManager({
     <div className="space-y-5">
       {message && <Alert tone={message.tone}>{message.text}</Alert>}
 
-      {canManage && state.temporaryPassword && (
-        <Alert tone="warning" title="Give them this password now">
-          <span className="mt-1 block font-mono text-base">
-            {state.temporaryPassword}
-          </span>
-          <span className="mt-2 block text-xs">
-            It is shown once and cannot be looked up again. Tell them in
-            person — they can change it from the sign-in screen using
-            &ldquo;Forgotten your password&rdquo;.
-          </span>
-          <span className="mt-2 block">
-            <Button variant="outline" size="sm" onClick={copyPassword}>
-              {copied ? (
-                <Check className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <Copy className="h-4 w-4" aria-hidden="true" />
-              )}
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          </span>
-        </Alert>
-      )}
+      {canManage && state.success && <Alert tone="success">{state.success}</Alert>}
 
       {canManage && !open && (
         <Button variant="outline" onClick={() => setOpen(true)}>
@@ -167,49 +204,46 @@ export function TeamManager({
 
           <form action={formAction} className="mt-4 space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="First name" htmlFor="t-first">
-                <Input id="t-first" name="firstName" required maxLength={100} />
-              </Field>
-              <Field label="Last name" htmlFor="t-last">
-                <Input id="t-last" name="lastName" required maxLength={100} />
+              <Field label="Name" htmlFor="t-name">
+                <Input
+                  id="t-name"
+                  name="name"
+                  required
+                  maxLength={150}
+                  placeholder="Madison Sigman"
+                />
               </Field>
               <Field
-                label="Preferred name"
-                htmlFor="t-preferred"
-                hint="What everyone actually calls them."
+                label="What are they hired for?"
+                htmlFor="t-title"
+                hint="This automatically appears when you roster them."
               >
-                <Input id="t-preferred" name="preferredName" maxLength={100} />
-              </Field>
-              <Field label="Job title" htmlFor="t-title">
                 <Input
                   id="t-title"
                   name="jobTitle"
+                  required
                   maxLength={100}
-                  placeholder="Room Attendant"
+                  placeholder="Housekeeping"
                 />
               </Field>
-              <Field label="Email" htmlFor="t-email" hint="They sign in with this.">
-                <Input id="t-email" name="email" type="email" required />
-              </Field>
-              <Field label="Mobile" htmlFor="t-mobile">
-                <Input id="t-mobile" name="mobile" type="tel" maxLength={30} />
+              <Field
+                label="6-digit staff code"
+                htmlFor="t-pin"
+                hint="They use this code only on the kiosk keypad."
+              >
+                <Input
+                  id="t-pin"
+                  name="pin"
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  minLength={6}
+                  maxLength={6}
+                  required
+                  autoComplete="new-password"
+                />
               </Field>
             </div>
-
-            <Field label="Role" htmlFor="t-role">
-              <select
-                id="t-role"
-                name="role"
-                required
-                defaultValue="staff"
-                className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-              >
-                <option value="staff">Staff</option>
-                <option value="supervisor">Supervisor</option>
-                <option value="manager">Manager</option>
-                <option value="administrator">Administrator</option>
-              </select>
-            </Field>
 
             <fieldset>
               <legend className="text-sm font-medium text-slate-900 dark:text-slate-100">
@@ -225,6 +259,7 @@ export function TeamManager({
                       type="checkbox"
                       name="propertyIds"
                       value={p.id}
+                      defaultChecked
                       className="h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
                     />
                     {p.name}

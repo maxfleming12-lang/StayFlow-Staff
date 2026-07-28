@@ -85,6 +85,7 @@ export function ShiftForm({
     saveShift,
     {},
   );
+  const [requiredRole, setRequiredRole] = useState("");
 
   // Restore what was submitted. Without this the conflict re-render resets
   // every uncontrolled input to its default, so a manager could acknowledge
@@ -153,6 +154,10 @@ export function ShiftForm({
               id="shift-user"
               name="userId"
               defaultValue={v?.userId ?? ""}
+              onChange={(event) => {
+                const person = staff.find((s) => s.id === event.target.value);
+                setRequiredRole(person?.jobTitle ?? "");
+              }}
               className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
             >
               <option value="">Unassigned (open shift)</option>
@@ -217,7 +222,8 @@ export function ShiftForm({
             <Input
               id="shift-role"
               name="requiredRole"
-              defaultValue={v?.requiredRole ?? ""}
+              value={requiredRole}
+              onChange={(event) => setRequiredRole(event.target.value)}
               maxLength={100}
               placeholder="Night reception"
             />

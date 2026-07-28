@@ -42,7 +42,7 @@ export default async function TeamPage() {
         </h1>
         <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
           {canManage
-            ? "Add people, set what they can do, and manage access."
+            ? "Add staff with a name, job description and 6-digit kiosk code."
             : "Everyone you work with."}
         </p>
       </div>

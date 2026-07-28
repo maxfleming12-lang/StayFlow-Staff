@@ -1,218 +1,149 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
-import { useFormStatus } from "react-dom";
-import { Delete, UserRound } from "lucide-react";
+import { useActionState, useEffect, useRef, useState } from "react";
+import { Delete } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
 import { kioskPunch, type KioskActionState } from "@/lib/kiosk/actions";
-import type { ClockEventType } from "@/lib/clock/state";
-
-interface Staff {
-  id: string;
-  displayName: string;
-  hasPin: boolean;
-}
-
-const ACTIONS: { value: ClockEventType; label: string }[] = [
-  { value: "clock_in", label: "Clock in" },
-  { value: "break_start", label: "Start break" },
-  { value: "break_end", label: "End break" },
-  { value: "clock_out", label: "Clock out" },
-];
-
-function SubmitButton({ disabled }: { disabled: boolean }) {
-  const { pending } = useFormStatus();
-  return (
-    <Button
-      type="submit"
-      disabled={disabled || pending}
-      aria-busy={pending}
-      className="h-14 w-full text-base"
-    >
-      {pending ? "Checking…" : "Confirm"}
-    </Button>
-  );
-}
 
 /**
- * Kiosk clock for a shared tablet.
+ * PIN-first shared kiosk.
  *
- * Deliberately returns to the staff list after every action, successful or
- * not. A kiosk left showing the previous person's name is how somebody
- * clocks out the wrong colleague, and how a queue at shift change turns
- * into an argument about whose hours are whose.
+ * Six digits identify the staff member and toggle their clock state: the
+ * first entry clocks in and the next clocks out. No staff directory or
+ * employment detail is exposed on the shared tablet.
  */
-export function KioskClock({
-  staff,
-  propertyName,
-}: {
-  staff: Staff[];
-  propertyName: string;
-}) {
-  const [selected, setSelected] = useState<Staff | null>(null);
-  const [action, setAction] = useState<ClockEventType>("clock_in");
+export function KioskClock({ propertyName }: { propertyName: string }) {
+  const formRef = useRef<HTMLFormElement>(null);
   const [pin, setPin] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [dismissedOutcome, setDismissedOutcome] = useState(false);
   const [state, formAction] = useActionState<KioskActionState, FormData>(
     kioskPunch,
     {},
   );
 
-  // Clear the screen after any outcome, so the next person starts fresh and
-  // no PIN or name is left on display.
   useEffect(() => {
     if (!state.success && !state.error) return;
-    const id = setTimeout(() => {
-      setSelected(null);
+    const readyId = setTimeout(() => {
+      setSubmitting(false);
+      setDismissedOutcome(false);
+    }, 0);
+    const resetId = setTimeout(() => {
       setPin("");
-      setAction("clock_in");
-    }, 4000);
-    return () => clearTimeout(id);
+      setSubmitting(false);
+      setDismissedOutcome(true);
+    }, 10_000);
+    return () => {
+      clearTimeout(readyId);
+      clearTimeout(resetId);
+    };
   }, [state]);
 
-  if (state.success || state.error) {
+  const showOutcome =
+    !submitting &&
+    !dismissedOutcome &&
+    Boolean(state.success || state.error);
+
+  if (showOutcome) {
     return (
       <div className="space-y-4 text-center">
         <Alert tone={state.success ? "success" : "error"}>
           {state.success ?? state.error}
         </Alert>
-        <Button
-          variant="outline"
-          onClick={() => {
-            setSelected(null);
-            setPin("");
-          }}
-        >
-          Done
-        </Button>
-      </div>
-    );
-  }
-
-  if (!selected) {
-    return (
-      <div>
-        <h2 className="text-center text-sm font-medium text-slate-500 dark:text-slate-400">
-          {propertyName} — tap your name
-        </h2>
-        {staff.length === 0 ? (
-          <p className="mt-6 text-center text-sm text-slate-500 dark:text-slate-400">
-            Nobody is set up to clock on at this property yet.
-          </p>
-        ) : (
-          <ul className="mt-4 grid grid-cols-2 gap-3">
-            {staff.map((person) => (
-              <li key={person.id}>
-                <button
-                  type="button"
-                  onClick={() => setSelected(person)}
-                  disabled={!person.hasPin}
-                  className="flex h-20 w-full flex-col items-center justify-center gap-1 rounded-xl border border-slate-300 bg-white text-base font-medium text-slate-900 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                >
-                  <UserRound className="h-5 w-5" aria-hidden="true" />
-                  {person.displayName}
-                  {!person.hasPin && (
-                    <span className="text-xs font-normal text-slate-500">
-                      No PIN set
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    );
-  }
-
-  const press = (digit: string) => setPin((p) => (p + digit).slice(0, 10));
-
-  return (
-    <form action={formAction} className="space-y-4">
-      <input type="hidden" name="userId" value={selected.id} />
-      <input type="hidden" name="pin" value={pin} />
-      <input type="hidden" name="eventType" value={action} />
-
-      <div className="text-center">
-        <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-          {selected.displayName}
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Returning to the keypad in 10 seconds…
         </p>
         <button
           type="button"
           onClick={() => {
-            setSelected(null);
             setPin("");
+            setSubmitting(false);
+            setDismissedOutcome(true);
           }}
-          className="text-sm text-teal-700 underline dark:text-teal-400"
+          className="text-sm font-medium text-teal-700 underline dark:text-teal-400"
         >
-          Not you?
+          Next person
         </button>
       </div>
+    );
+  }
 
-      <div className="grid grid-cols-2 gap-2">
-        {ACTIONS.map((a) => (
-          <button
-            key={a.value}
-            type="button"
-            onClick={() => setAction(a.value)}
-            aria-pressed={action === a.value}
-            className={`h-12 rounded-lg border text-sm font-medium ${
-              action === a.value
-                ? "border-teal-600 bg-teal-50 text-teal-800 dark:bg-teal-950 dark:text-teal-300"
-                : "border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-400"
-            }`}
-          >
-            {a.label}
-          </button>
-        ))}
-      </div>
+  const press = (digit: string) => {
+    if (submitting) return;
+    const next = (pin + digit).slice(0, 6);
+    setPin(next);
+    if (next.length === 6) {
+      setSubmitting(true);
+      setDismissedOutcome(true);
+      queueMicrotask(() => formRef.current?.requestSubmit());
+    }
+  };
 
-      <div>
-        <p
-          className="text-center text-3xl tracking-[0.5em] text-slate-900 dark:text-slate-50"
-          aria-live="polite"
-          aria-label={`${pin.length} digits entered`}
-        >
-          {"•".repeat(pin.length) || <span className="opacity-30">····</span>}
+  return (
+    <form ref={formRef} action={formAction} className="space-y-5">
+      <input type="hidden" name="pin" value={pin} />
+
+      <div className="text-center">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+          Enter your 6-digit staff code
+        </h2>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          {propertyName}
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
-        {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
+      <p
+        className="min-h-10 text-center text-3xl tracking-[0.45em] text-slate-900 dark:text-slate-50"
+        aria-live="polite"
+        aria-label={`${pin.length} of 6 digits entered`}
+      >
+        {"•".repeat(pin.length) || <span className="opacity-30">••••••</span>}
+      </p>
+
+      <div className="grid grid-cols-3 gap-3">
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((digit) => (
           <button
-            key={d}
+            key={digit}
             type="button"
-            onClick={() => press(d)}
-            className="h-16 rounded-lg border border-slate-300 text-xl font-medium text-slate-900 dark:border-slate-700 dark:text-slate-100"
+            disabled={submitting}
+            onClick={() => press(digit)}
+            className="h-20 rounded-xl border border-slate-300 bg-white text-2xl font-semibold text-slate-900 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           >
-            {d}
+            {digit}
           </button>
         ))}
         <button
           type="button"
+          disabled={submitting}
           onClick={() => setPin("")}
-          className="h-16 rounded-lg border border-slate-300 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-400"
+          className="h-20 rounded-xl border border-slate-300 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-400"
         >
           Clear
         </button>
         <button
           type="button"
+          disabled={submitting}
           onClick={() => press("0")}
-          className="h-16 rounded-lg border border-slate-300 text-xl font-medium text-slate-900 dark:border-slate-700 dark:text-slate-100"
+          className="h-20 rounded-xl border border-slate-300 bg-white text-2xl font-semibold text-slate-900 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
         >
           0
         </button>
         <button
           type="button"
-          onClick={() => setPin((p) => p.slice(0, -1))}
+          disabled={submitting}
+          onClick={() => setPin((current) => current.slice(0, -1))}
           aria-label="Delete last digit"
-          className="flex h-16 items-center justify-center rounded-lg border border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-400"
+          className="flex h-20 items-center justify-center rounded-xl border border-slate-300 text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-400"
         >
-          <Delete className="h-5 w-5" aria-hidden="true" />
+          <Delete className="h-6 w-6" aria-hidden="true" />
         </button>
       </div>
 
-      <SubmitButton disabled={pin.length < 4} />
+      {submitting && (
+        <p className="text-center text-sm text-slate-500" aria-live="polite">
+          Checking…
+        </p>
+      )}
     </form>
   );
 }

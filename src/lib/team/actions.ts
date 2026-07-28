@@ -16,6 +16,171 @@ export interface TeamActionState {
   temporaryPassword?: string;
 }
 
+const basicStaffSchema = z.object({
+  name: z.string().trim().min(1, "Enter their name.").max(150),
+  jobTitle: z.string().trim().min(1, "Enter what they are hired for.").max(100),
+  pin: z.string().regex(/^\d{6}$/, "Enter a 6-digit code."),
+  propertyIds: z.array(z.string().uuid()).min(1, "Choose at least one property."),
+});
+
+/** Add a kiosk-only staff member with the minimum useful information. */
+export async function addBasicStaff(
+  _prev: TeamActionState,
+  formData: FormData,
+): Promise<TeamActionState> {
+  const actor = await requireRole("administrator");
+  const parsed = basicStaffSchema.safeParse({
+    name: formData.get("name"),
+    jobTitle: formData.get("jobTitle"),
+    pin: formData.get("pin"),
+    propertyIds: formData.getAll("propertyIds").map(String).filter(Boolean),
+  });
+
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+  if (
+    /^(\d)\1+$/.test(parsed.data.pin) ||
+    "0123456789".includes(parsed.data.pin)
+  ) {
+    return { error: "Choose a less predictable 6-digit code." };
+  }
+
+  const parts = parsed.data.name.split(/\s+/);
+  const firstName = parts.shift() ?? parsed.data.name;
+  const lastName = parts.join(" ");
+  const temporaryPassword = randomBytes(24).toString("base64url");
+  const syntheticEmail = `kiosk-${randomBytes(12).toString("hex")}@staff.stayflow.invalid`;
+  let createdUserId: string | null = null;
+
+  try {
+    const admin = createServiceRoleClient();
+    const { data: created, error: authError } =
+      await admin.auth.admin.createUser({
+        email: syntheticEmail,
+        password: temporaryPassword,
+        email_confirm: true,
+      });
+
+    if (authError || !created.user) {
+      return { error: "Could not create that staff member." };
+    }
+    createdUserId = created.user.id;
+
+    const { error: profileError } = await admin.from("profiles").insert({
+      id: created.user.id,
+      organisation_id: actor.organisationId,
+      preferred_name: parsed.data.name,
+      legal_first_name: firstName,
+      legal_last_name: lastName,
+      email: syntheticEmail,
+      job_title: parsed.data.jobTitle,
+      primary_property_id: parsed.data.propertyIds[0],
+      is_active: true,
+    });
+    if (profileError) throw profileError;
+
+    const { error: roleError } = await admin.from("user_roles").insert({
+      organisation_id: actor.organisationId,
+      user_id: created.user.id,
+      role: "staff" as AppRole,
+    });
+    if (roleError) throw roleError;
+
+    const { error: accessError } = await admin
+      .from("user_property_access")
+      .insert(
+        parsed.data.propertyIds.map((propertyId) => ({
+          organisation_id: actor.organisationId,
+          user_id: created.user.id,
+          property_id: propertyId,
+        })),
+      );
+    if (accessError) throw accessError;
+
+    const { error: pinError } = await admin.rpc("set_kiosk_pin", {
+      p_user: created.user.id,
+      p_pin: parsed.data.pin,
+    });
+    if (pinError) throw pinError;
+  } catch (error) {
+    if (createdUserId) {
+      await createServiceRoleClient().auth.admin.deleteUser(createdUserId);
+    }
+    return {
+      error:
+        error instanceof Error
+          ? `Could not add staff: ${error.message}`
+          : "Could not add that staff member.",
+    };
+  }
+
+  revalidatePath("/team");
+  revalidatePath("/manage/kiosk");
+  return { success: `${parsed.data.name} was added with their 6-digit code.` };
+}
+
+const updateBasicStaffSchema = z.object({
+  userId: z.string().uuid(),
+  name: z.string().trim().min(1, "Enter their name.").max(150),
+  jobTitle: z.string().trim().min(1, "Enter what they are hired for.").max(100),
+  pin: z.union([z.literal(""), z.string().regex(/^\d{6}$/)]),
+});
+
+/** Change the basic fields without opening the full employment profile. */
+export async function updateBasicStaff(
+  _prev: TeamActionState,
+  formData: FormData,
+): Promise<TeamActionState> {
+  const actor = await requireRole("administrator");
+  const parsed = updateBasicStaffSchema.safeParse({
+    userId: formData.get("userId"),
+    name: formData.get("name"),
+    jobTitle: formData.get("jobTitle"),
+    pin: formData.get("pin") ?? "",
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+  if (
+    parsed.data.pin &&
+    (/^(\d)\1+$/.test(parsed.data.pin) ||
+      "0123456789".includes(parsed.data.pin))
+  ) {
+    return { error: "Choose a less predictable 6-digit code." };
+  }
+
+  const parts = parsed.data.name.split(/\s+/);
+  const firstName = parts.shift() ?? parsed.data.name;
+  const lastName = parts.join(" ");
+
+  try {
+    const admin = createServiceRoleClient();
+    const { error: profileError } = await admin
+      .from("profiles")
+      .update({
+        preferred_name: parsed.data.name,
+        legal_first_name: firstName,
+        legal_last_name: lastName,
+        job_title: parsed.data.jobTitle,
+      })
+      .eq("organisation_id", actor.organisationId)
+      .eq("id", parsed.data.userId);
+    if (profileError) return { error: "Could not update that staff member." };
+
+    if (parsed.data.pin) {
+      const { error: pinError } = await admin.rpc("set_kiosk_pin", {
+        p_user: parsed.data.userId,
+        p_pin: parsed.data.pin,
+      });
+      if (pinError) return { error: pinError.message };
+    }
+  } catch {
+    return { error: "Cannot reach StayFlow right now." };
+  }
+
+  revalidatePath("/team");
+  revalidatePath("/manage/roster");
+  revalidatePath("/manage/kiosk");
+  return { success: `${parsed.data.name}'s profile was updated.` };
+}
+
 const inviteSchema = z.object({
   email: z.string().trim().toLowerCase().email("Enter a valid email address."),
   firstName: z.string().trim().min(1, "Enter their first name.").max(100),

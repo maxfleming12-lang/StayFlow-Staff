@@ -98,7 +98,7 @@ const pinSchema = z.object({
   userId: z.string().uuid(),
   pin: z
     .string()
-    .regex(/^[0-9]{4,10}$/, "A PIN must be 4 to 10 digits."),
+    .regex(/^[0-9]{6}$/, "Enter a 6-digit code."),
 });
 
 /**
@@ -154,9 +154,11 @@ export async function setStaffPin(
 /* ------------------------------------------------------------------ */
 
 const punchSchema = z.object({
-  userId: z.string().uuid(),
-  pin: z.string().regex(/^[0-9]{4,10}$/),
-  eventType: z.enum(["clock_in", "break_start", "break_end", "clock_out"]),
+  userId: z.string().uuid().optional(),
+  pin: z.string().regex(/^[0-9]{6}$/),
+  eventType: z
+    .enum(["clock_in", "break_start", "break_end", "clock_out"])
+    .optional(),
 });
 
 /**
@@ -186,10 +188,26 @@ export async function kioskPunch(
     return { error: "Enter your PIN." };
   }
 
-  const { userId, pin, eventType } = parsed.data;
+  const { pin } = parsed.data;
 
   try {
     const admin = createServiceRoleClient();
+    let userId = parsed.data.userId;
+    let displayName = "";
+
+    if (!userId) {
+      const { data: resolved, error: resolveError } = await admin.rpc(
+        "resolve_kiosk_user",
+        { p_property: session.propertyId, p_pin: pin },
+      );
+      if (resolveError) {
+        return { error: "Could not check that code. Try again." };
+      }
+      if (!resolved) {
+        return { error: "That code is not recognised at this property." };
+      }
+      userId = resolved;
+    }
 
     // The person must actually work at this property. Without this, a valid
     // PIN would clock someone on at a motel they have no business at.
@@ -204,26 +222,14 @@ export async function kioskPunch(
       return { error: "You are not set up to clock on at this property." };
     }
 
-    const { data: status, error: verifyError } = await admin.rpc(
-      "verify_kiosk_pin",
-      { p_user: userId, p_pin: pin },
-    );
-
-    if (verifyError) {
-      return { error: "Could not check that PIN. Try again." };
-    }
-
-    if (status === "no_pin") {
-      return { error: "No PIN is set for you yet. Ask your manager." };
-    }
-    if (status === "locked") {
-      return {
-        error:
-          "Too many wrong attempts. This PIN is locked for a while — ask your manager, or clock on from your own phone.",
-      };
-    }
-    if (status !== "ok") {
-      return { error: "That PIN is not right." };
+    if (parsed.data.userId) {
+      const { data: status, error: verifyError } = await admin.rpc(
+        "verify_kiosk_pin",
+        { p_user: userId, p_pin: pin },
+      );
+      if (verifyError || status !== "ok") {
+        return { error: "That code is not right." };
+      }
     }
 
     // Same derived-state rule as the app clock, so a kiosk cannot record a
@@ -245,6 +251,9 @@ export async function kioskPunch(
     }));
 
     const state = deriveClockState(events);
+    const eventType =
+      parsed.data.eventType ??
+      (state.status === "clocked_out" ? "clock_in" : "clock_out");
     if (!isActionAllowed(state.status, eventType)) {
       return { error: "That is not possible from your current state." };
     }
@@ -265,12 +274,23 @@ export async function kioskPunch(
     if (insertError) {
       return { error: `Could not record that: ${insertError.message}` };
     }
+
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("preferred_name, legal_first_name")
+      .eq("id", userId)
+      .maybeSingle();
+    displayName = String(
+      profile?.preferred_name || profile?.legal_first_name || "",
+    ).trim();
+
+    revalidatePath("/kiosk");
+    return {
+      success: `${displayName ? `${displayName}: ` : ""}${confirmationFor(eventType)}`,
+    };
   } catch {
     return { error: "Cannot reach StayFlow right now. Try again shortly." };
   }
-
-  revalidatePath("/kiosk");
-  return { success: confirmationFor(eventType) };
 }
 
 function confirmationFor(action: ClockEventType): string {
