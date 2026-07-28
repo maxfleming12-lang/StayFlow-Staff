@@ -239,6 +239,78 @@ export async function deleteShift(shiftId: string): Promise<RosterActionState> {
   return { success: "Shift removed." };
 }
 
+const clearWeekSchema = z.object({
+  weekStartDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid week."),
+  propertyId: z.union([z.string().uuid(), z.literal("")]).optional(),
+});
+
+/**
+ * Archive every shift and roster period in a displayed week.
+ *
+ * This is deliberately a soft delete. It lets a manager rebuild a bad roster
+ * without breaking attendance, acknowledgement or audit references.
+ */
+export async function clearRosterWeek(
+  _prev: RosterActionState,
+  formData: FormData,
+): Promise<RosterActionState> {
+  const user = await requireRole("administrator");
+  const parsed = clearWeekSchema.safeParse({
+    weekStartDate: formData.get("weekStartDate"),
+    propertyId: (formData.get("propertyId") as string) || "",
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
+
+  try {
+    const supabase = await createClient();
+    const { weekRange } = await import("./week");
+    const { fromIso, toIso } = weekRange(parsed.data.weekStartDate);
+    const now = new Date().toISOString();
+
+    let shiftQuery = supabase
+      .from("shifts")
+      .update({ archived_at: now })
+      .eq("organisation_id", user.organisationId)
+      .gte("starts_at", fromIso)
+      .lt("starts_at", toIso)
+      .is("archived_at", null);
+
+    let periodQuery = supabase
+      .from("roster_periods")
+      .update({ archived_at: now })
+      .eq("organisation_id", user.organisationId)
+      .eq("week_start_date", parsed.data.weekStartDate)
+      .eq("is_template", false)
+      .is("archived_at", null);
+
+    if (parsed.data.propertyId) {
+      shiftQuery = shiftQuery.eq("property_id", parsed.data.propertyId);
+      periodQuery = periodQuery.eq("property_id", parsed.data.propertyId);
+    }
+
+    const [{ data: shifts, error: shiftError }, { error: periodError }] =
+      await Promise.all([
+        shiftQuery.select("id"),
+        periodQuery.select("id"),
+      ]);
+
+    if (shiftError || periodError) {
+      return { error: "Could not clear the roster week." };
+    }
+
+    revalidatePath("/manage/roster");
+    revalidatePath("/roster");
+    return {
+      success: `Cleared ${shifts?.length ?? 0} shift${shifts?.length === 1 ? "" : "s"}.`,
+    };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
+}
+
 const assignShiftSchema = z.object({
   shiftId: z.string().uuid(),
   userId: z.string().uuid("Choose a staff member."),

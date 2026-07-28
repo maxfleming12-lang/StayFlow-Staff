@@ -11,6 +11,10 @@ import {
   saveWeekAsTemplate,
   type TemplateActionState,
 } from "@/lib/roster/template-actions";
+import {
+  clearRosterWeek,
+  type RosterActionState,
+} from "@/lib/roster/manager-actions";
 import type { RosterProperty } from "@/lib/roster/manager-queries";
 import { formatWeekLabel, shiftWeek } from "@/lib/roster/week";
 
@@ -34,7 +38,7 @@ function Result({ state }: { state: TemplateActionState }) {
   );
 }
 
-type Tool = null | "copy" | "save" | "apply";
+type Tool = null | "copy" | "save" | "apply" | "clear";
 
 /**
  * Week-level tools: duplicate a week, save it as a template, apply one.
@@ -47,10 +51,14 @@ export function WeekTools({
   weekStartDate,
   properties,
   templates,
+  propertyId,
+  shiftCount,
 }: {
   weekStartDate: string;
   properties: RosterProperty[];
   templates: { id: string; name: string; propertyId: string }[];
+  propertyId?: string;
+  shiftCount: number;
 }) {
   const [tool, setTool] = useState<Tool>(null);
   const [copyState, copyAction] = useActionState<TemplateActionState, FormData>(
@@ -65,6 +73,10 @@ export function WeekTools({
     TemplateActionState,
     FormData
   >(applyTemplate, {});
+  const [clearState, clearAction] = useActionState<RosterActionState, FormData>(
+    clearRosterWeek,
+    {},
+  );
 
   const propertySelect = (id: string) => (
     <Field label="Property" htmlFor={id}>
@@ -100,6 +112,10 @@ export function WeekTools({
         <Result state={copyState} />
         <Result state={saveState} />
         <Result state={applyState} />
+        {clearState.error && <Alert tone="error">{clearState.error}</Alert>}
+        {clearState.success && (
+          <Alert tone="success">{clearState.success}</Alert>
+        )}
       </div>
 
       {tool === null && (
@@ -119,6 +135,14 @@ export function WeekTools({
             {templates.length === 0
               ? "No templates saved yet"
               : "Apply a template"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={shiftCount === 0}
+            onClick={() => setTool("clear")}
+          >
+            Clear this week
           </Button>
         </div>
       )}
@@ -203,6 +227,26 @@ export function WeekTools({
           </Field>
           <div className="flex gap-2">
             <Pending label="Apply template" />
+            <Button variant="ghost" size="sm" onClick={() => setTool(null)}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {tool === "clear" && (
+        <form action={clearAction} className="mt-4 space-y-4">
+          <input type="hidden" name="weekStartDate" value={weekStartDate} />
+          <input type="hidden" name="propertyId" value={propertyId ?? ""} />
+          <Alert tone="warning">
+            This will remove {shiftCount} shift
+            {shiftCount === 1 ? "" : "s"} from{" "}
+            <strong>{formatWeekLabel(weekStartDate)}</strong>
+            {propertyId ? " for the selected property" : " across both properties"}.
+            Staff and settings will not be changed.
+          </Alert>
+          <div className="flex gap-2">
+            <Pending label="Yes, clear this week" />
             <Button variant="ghost" size="sm" onClick={() => setTool(null)}>
               Cancel
             </Button>

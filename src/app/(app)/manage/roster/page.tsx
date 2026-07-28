@@ -191,6 +191,8 @@ export default async function ManageRosterPage({
         weekStartDate={current}
         properties={roster.properties}
         templates={templates}
+        propertyId={property}
+        shiftCount={roster.shifts.length}
       />
 
       <PublishRoster
