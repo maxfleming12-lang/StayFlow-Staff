@@ -1,4 +1,5 @@
 import { spanHours } from "./hours";
+import { localDateTimeToIso } from "./week";
 
 /**
  * Roster conflict detection.
@@ -251,8 +252,12 @@ function leaveCoversShift(
   const day = [...shiftDates].find(
     (d) => d >= leave.firstDate && d <= leave.lastDate,
   )!;
-  const leaveStart = new Date(`${day}T${leave.startTime}`);
-  const leaveEnd = new Date(`${day}T${leave.endTime}`);
+  // The stored times are wall-clock at the property, so they must be resolved
+  // against `tz`. Parsing them as host-local made a 9am–5pm leave window read
+  // as 9am–5pm UTC on the server — 7pm–3am in Sydney — so daytime leave never
+  // clashed with a daytime shift.
+  const leaveStart = new Date(localDateTimeToIso(`${day}T${leave.startTime}`, tz));
+  const leaveEnd = new Date(localDateTimeToIso(`${day}T${leave.endTime}`, tz));
   return overlaps(start, end, leaveStart, leaveEnd);
 }
 
@@ -274,8 +279,9 @@ function isUnavailable(
     if (rule.isAvailable) return false;
     // No times means the whole day is unavailable.
     if (!rule.startTime || !rule.endTime) return true;
-    const from = new Date(`${dateKey}T${rule.startTime}`);
-    const to = new Date(`${dateKey}T${rule.endTime}`);
+    // Wall-clock at the property, as with leave above.
+    const from = new Date(localDateTimeToIso(`${dateKey}T${rule.startTime}`, tz));
+    const to = new Date(localDateTimeToIso(`${dateKey}T${rule.endTime}`, tz));
     return overlaps(start, end, from, to);
   });
 }

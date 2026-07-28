@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
+import { addIsoDays, startOfLocalDay } from "@/lib/format";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import { notify } from "@/lib/notifications/deliver";
 import type { ClockEvent, ClockEventType } from "@/lib/clock/state";
@@ -57,16 +58,23 @@ export async function generateTimesheets(
 
   try {
     const admin = createServiceRoleClient();
-    const from = new Date(`${fromDate}T00:00:00+10:00`);
-    const to = new Date(`${toDate}T23:59:59+10:00`);
+
+    // Half-open [from, until): local midnight on `fromDate` to local midnight
+    // on the day after `toDate`. The offset must come from the timezone rather
+    // than a hardcoded "+10:00", which is an hour out during AEDT — from
+    // October to April that window started at 1am and ran an hour into the
+    // following day, so the first hour of clock events went missing and an
+    // hour of the next day was swept in.
+    const from = startOfLocalDay(fromDate);
+    const until = startOfLocalDay(addIsoDays(toDate, 1));
 
     const [eventRes, shiftRes, existingRes] = await Promise.all([
       admin
         .from("clock_events")
         .select("id, user_id, event_type, server_time, shift_id")
         .eq("property_id", propertyId)
-        .gte("server_time", from.toISOString())
-        .lte("server_time", to.toISOString())
+        .gte("server_time", from)
+        .lt("server_time", until)
         .order("server_time", { ascending: true }),
       admin
         .from("shifts")
@@ -74,8 +82,8 @@ export async function generateTimesheets(
         .eq("property_id", propertyId)
         .eq("status", "published")
         .is("archived_at", null)
-        .gte("starts_at", from.toISOString())
-        .lte("starts_at", to.toISOString()),
+        .gte("starts_at", from)
+        .lt("starts_at", until),
       admin
         .from("timesheets")
         .select("user_id, work_date")
