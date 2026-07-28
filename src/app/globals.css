@@ -41,3 +41,45 @@ body {
   outline: 2px solid #0d9488;
   outline-offset: 2px;
 }
+
+@media print {
+  @page {
+    size: landscape;
+    margin: 10mm;
+  }
+
+  header,
+  nav[aria-label="Primary"],
+  [data-print-hide] {
+    display: none !important;
+  }
+
+  body,
+  main {
+    background: white !important;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  .roster-print-root {
+    color: black;
+    font-size: 9pt;
+  }
+
+  .roster-print-root .overflow-x-auto {
+    overflow: visible !important;
+  }
+
+  .roster-print-root table {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .roster-print-root tr,
+  .roster-print-root th,
+  .roster-print-root td {
+    break-inside: avoid;
+  }
+}

@@ -13,6 +13,7 @@ import {
 import { formatCurrency, formatHours } from "@/lib/format";
 import { hospitalityCasualEstimatedCost } from "@/lib/roster/hours";
 import { RosterGrid } from "@/components/roster/roster-grid";
+import { PrintRosterButton } from "@/components/roster/print-roster-button";
 import { PublishRoster } from "@/components/roster/publish-roster";
 import { ShiftForm } from "@/components/roster/shift-form";
 import { WeekTools } from "@/components/roster/week-tools";
@@ -64,7 +65,7 @@ export default async function ManageRosterPage({
     `/manage/roster?week=${w}${property ? `&property=${property}` : ""}`;
 
   return (
-    <div className="space-y-5">
+    <div className="roster-print-root space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
@@ -75,7 +76,13 @@ export default async function ManageRosterPage({
           </p>
         </div>
 
-        <nav className="flex items-center gap-1" aria-label="Roster week">
+        <div className="flex items-center gap-2">
+          <PrintRosterButton />
+          <nav
+            className="flex items-center gap-1"
+            aria-label="Roster week"
+            data-print-hide
+          >
           <Link
             href={hrefFor(shiftWeek(current, -1))}
             aria-label="Previous week"
@@ -96,11 +103,12 @@ export default async function ManageRosterPage({
           >
             <ChevronRight className="h-5 w-5" aria-hidden="true" />
           </Link>
-        </nav>
+          </nav>
+        </div>
       </div>
 
       {/* Property filter */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" data-print-hide>
         <Link
           href={`/manage/roster?week=${current}`}
           className={`rounded-full border px-3 py-1.5 text-sm ${
@@ -132,7 +140,7 @@ export default async function ManageRosterPage({
       </div>
 
       {/* Week totals */}
-      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-print-hide>
         <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
           <dt className="text-xs text-slate-500 dark:text-slate-400">Shifts</dt>
           <dd className="mt-0.5 text-lg font-semibold text-slate-900 dark:text-slate-50">
@@ -173,11 +181,13 @@ export default async function ManageRosterPage({
         </div>
       </dl>
 
-      <ShiftForm
-        properties={roster.properties}
-        staff={roster.staff}
-        defaultDate={days[0]}
-      />
+      <div data-print-hide>
+        <ShiftForm
+          properties={roster.properties}
+          staff={roster.staff}
+          defaultDate={days[0]}
+        />
+      </div>
 
       <RosterGrid
         days={days}
@@ -187,23 +197,27 @@ export default async function ManageRosterPage({
         weekStartDate={current}
       />
 
-      <WeekTools
-        weekStartDate={current}
-        properties={roster.properties}
-        templates={templates}
-        propertyId={property}
-        shiftCount={roster.shifts.length}
-      />
+      <div data-print-hide>
+        <WeekTools
+          weekStartDate={current}
+          properties={roster.properties}
+          templates={templates}
+          propertyId={property}
+          shiftCount={roster.shifts.length}
+        />
+      </div>
 
-      <PublishRoster
-        weekStartDate={current}
-        properties={roster.properties}
-        periods={roster.periods}
-        draftCount={roster.shifts.filter((s) => s.status === "draft").length}
-      />
+      <div data-print-hide>
+        <PublishRoster
+          weekStartDate={current}
+          properties={roster.properties}
+          periods={roster.periods}
+          draftCount={roster.shifts.filter((s) => s.status === "draft").length}
+        />
+      </div>
 
       {showCost && (
-        <p className="text-xs text-slate-500 dark:text-slate-400">
+        <p className="text-xs text-slate-500 dark:text-slate-400" data-print-hide>
           Labour cost is an estimate using the configured casual base rates
           with Hospitality Award Saturday and Sunday multipliers. It excludes
           other penalties, loadings, overtime and allowances, and is not an

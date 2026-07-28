@@ -217,7 +217,7 @@ export function RosterGrid({
       )}
 
       {properties.length > 1 && (
-        <p className="text-xs text-slate-500 dark:text-slate-400">
+        <p className="text-xs text-slate-500 dark:text-slate-400" data-print-hide>
           The coloured edge on each shift shows its property.
         </p>
       )}
