@@ -29,8 +29,18 @@ const punchSchema = z.object({
   wasOffline: z.boolean().optional(),
 });
 
-/** Today's events for the signed-in user, in the property timezone. */
-async function todaysEvents(): Promise<ClockEvent[]> {
+/**
+ * Recent events for ONE person, to derive their clock state from.
+ *
+ * `user_id` is filtered explicitly and must stay that way. RLS is not enough
+ * here: `clock_events_select_management` lets a manager read every event at
+ * the properties they manage, and permissive policies are OR-ed, so an
+ * unfiltered query returned the whole floor's punches to any manager. Their
+ * own state was then derived from other people's — refusing a genuine clock-in
+ * because a housekeeper was already on, and worst of all attaching somebody
+ * else's `shift_id` to their event, which carries straight into payroll.
+ */
+async function todaysEvents(userId: string): Promise<ClockEvent[]> {
   const supabase = await createClient();
 
   // A shift can start late evening and finish after midnight, so look back
@@ -41,6 +51,7 @@ async function todaysEvents(): Promise<ClockEvent[]> {
   const { data, error } = await supabase
     .from("clock_events")
     .select("id, event_type, server_time, shift_id")
+    .eq("user_id", userId)
     .gte("server_time", from.toISOString())
     .order("server_time", { ascending: true });
 
@@ -58,8 +69,8 @@ async function todaysEvents(): Promise<ClockEvent[]> {
 
 /** The signed-in user's current clock state. */
 export async function getClockState() {
-  await requireUser();
-  const events = await todaysEvents();
+  const user = await requireUser();
+  const events = await todaysEvents(user.id);
   return { state: deriveClockState(events), events };
 }
 
@@ -100,7 +111,7 @@ export async function recordPunch(
   const clientTime = input.clientTime ?? new Date().toISOString();
 
   try {
-    const events = await todaysEvents();
+    const events = await todaysEvents(user.id);
     const state = deriveClockState(events);
 
     if (!isActionAllowed(state.status, input.eventType)) {

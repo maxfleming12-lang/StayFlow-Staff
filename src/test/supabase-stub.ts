@@ -16,7 +16,12 @@
 
 export interface StubResult {
   data?: unknown;
-  error?: { message: string } | null;
+  /**
+   * A PostgREST error. `code` is the Postgres SQLSTATE and is part of the
+   * contract, not decoration: `recordPunch` treats 23505 (unique violation)
+   * as SUCCESS, because a replayed offline punch has already been recorded.
+   */
+  error?: { message: string; code?: string; details?: string; hint?: string } | null;
   count?: number | null;
 }
 
