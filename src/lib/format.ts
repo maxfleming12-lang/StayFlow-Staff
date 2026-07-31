@@ -68,6 +68,38 @@ export function localDateTimeToIso(
 }
 
 /**
+ * An instant as a `datetime-local` input value, local to the property.
+ *
+ * The exact inverse of `localDateTimeToIso`, and the reason an edit form can
+ * show a manager the times they originally typed rather than the UTC ones
+ * stored. Formatting through the browser's own clock would show a Sydney
+ * 9am shift as something else entirely on a server rendering in UTC.
+ */
+export function localDateTimeValue(
+  value: Date | string,
+  timeZone: string = DEFAULT_TIMEZONE,
+): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone,
+  }).formatToParts(date);
+
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+
+  // en-CA gives 24-hour time, but midnight comes back as "24" in some ICU
+  // versions; the input needs "00".
+  const hour = get("hour") === "24" ? "00" : get("hour");
+  return `${get("year")}-${get("month")}-${get("day")}T${hour}:${get("minute")}`;
+}
+
+/**
  * The instant a local calendar day begins at the property.
  *
  * Pair the day after `date` with a strictly-less-than comparison to cover a

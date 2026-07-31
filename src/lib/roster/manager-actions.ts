@@ -168,11 +168,32 @@ export async function saveShift(
       overridden_by: input.overrideReason ? user.id : null,
     };
 
+    // Read the status BEFORE the write, to know whether this shift had
+    // already been published to somebody.
+    let existingStatus: string | null = null;
+    if (input.shiftId) {
+      const { data: existing } = await supabase
+        .from("shifts")
+        .select("status")
+        .eq("id", input.shiftId)
+        .is("archived_at", null)
+        .maybeSingle();
+
+      if (!existing) {
+        return {
+          error: "That shift no longer exists. It may have been removed.",
+          values,
+        };
+      }
+      existingStatus = String(existing.status);
+    }
+
     const { data, error } = input.shiftId
       ? await supabase
           .from("shifts")
           .update(payload)
           .eq("id", input.shiftId)
+          .is("archived_at", null)
           .select("id")
           .maybeSingle()
       : await supabase
@@ -191,8 +212,13 @@ export async function saveShift(
 
     // Replace breaks wholesale — simpler and less error-prone than diffing,
     // and a shift has at most a handful.
+    //
+    // The delete runs unconditionally. Guarding it on a non-zero break, as
+    // this did while nothing could edit a shift, meant clearing the break on
+    // an existing shift silently left the old one in place — the manager saw
+    // zero and payroll still deducted thirty minutes.
+    await supabase.from("shift_breaks").delete().eq("shift_id", data.id);
     if (input.breakMinutes && input.breakMinutes > 0) {
-      await supabase.from("shift_breaks").delete().eq("shift_id", data.id);
       await supabase.from("shift_breaks").insert({
         organisation_id: user.organisationId,
         shift_id: data.id,
@@ -201,7 +227,30 @@ export async function saveShift(
       });
     }
 
+    // Changing a PUBLISHED shift changes something the staff member has
+    // already been told about and may have planned around, so tell them.
+    // A draft is not yet visible to them and needs no message.
+    if (input.shiftId && input.userId && existingStatus === "published") {
+      await supabase
+        .from("shift_acknowledgements")
+        .update({ status: "pending" })
+        .eq("shift_id", input.shiftId)
+        .eq("user_id", input.userId);
+
+      await notify({
+        organisationId: user.organisationId,
+        propertyId: input.propertyId,
+        userIds: [input.userId],
+        category: "roster_published",
+        title: "A shift of yours changed",
+        // No times: this can appear on a locked phone.
+        body: "One of your rostered shifts has been changed. Open StayFlow to see it.",
+        deepLink: "/roster",
+      });
+    }
+
     revalidatePath("/manage/roster");
+    revalidatePath("/roster");
     return {
       success: input.shiftId ? "Shift updated." : "Shift added to the draft roster.",
       conflicts,
