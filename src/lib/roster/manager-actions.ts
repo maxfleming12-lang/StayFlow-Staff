@@ -263,31 +263,6 @@ export async function saveShift(
   }
 }
 
-/**
- * Archive a shift.
- *
- * Soft delete: attendance and audit history reference shifts, so removing
- * the row outright would orphan them.
- */
-export async function deleteShift(shiftId: string): Promise<RosterActionState> {
-  await requireRole("manager");
-
-  try {
-    const supabase = await createClient();
-    const { error } = await supabase
-      .from("shifts")
-      .update({ archived_at: new Date().toISOString() })
-      .eq("id", shiftId);
-
-    if (error) return { error: "Could not remove the shift." };
-  } catch {
-    return { error: "Cannot reach StayFlow right now." };
-  }
-
-  revalidatePath("/manage/roster");
-  return { success: "Shift removed." };
-}
-
 const removeShiftSchema = z.object({
   shiftId: z.string().uuid(),
 });

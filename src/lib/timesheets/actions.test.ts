@@ -32,6 +32,7 @@ const {
   resolveAdjustmentRequest,
   markPeriodExported,
   reopenExportedPeriod,
+  approveTimesheets,
 } = await import("./actions");
 const { notify } = await import("@/lib/notifications/deliver");
 const { requireRole } = await import("@/lib/auth/session");
@@ -614,5 +615,112 @@ describe("reopenExportedPeriod", () => {
     const result = await reopenExportedPeriod({}, period());
 
     expect(result.error).toMatch(/nothing in that period is marked as sent/i);
+  });
+});
+
+describe("approveTimesheets", () => {
+  const ids = [SHEET, "55555555-5555-4555-8555-555555555555"];
+
+  it("approves the selected timesheets and stamps the approver", async () => {
+    stub.on("timesheets", "update", {
+      data: [
+        { id: ids[0], user_id: STAFF, organisation_id: "org-1" },
+        { id: ids[1], user_id: STAFF, organisation_id: "org-1" },
+      ],
+    });
+
+    const result = await approveTimesheets({}, formData({ ids }));
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(update.payload).toMatchObject({
+      status: "approved",
+      approved_by: MANAGER.id,
+      approved_at: expect.any(String),
+    });
+    expect(hasFilter(update, "in", "id", ids)).toBe(true);
+    expect(result.success).toMatch(/Approved 2 timesheets/i);
+  });
+
+  it("does NOT erase an existing manager note when no note is typed", async () => {
+    stub.on("timesheets", "update", {
+      data: [{ id: ids[0], user_id: STAFF, organisation_id: "org-1" }],
+    });
+
+    await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    // Sending manager_note: null on a bulk approval wiped the reply a
+    // manager had written when declining a correction request — which is
+    // the only way the staff member ever sees that answer.
+    const payload = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("manager_note");
+  });
+
+  it("writes the note when one is given", async () => {
+    stub.on("timesheets", "update", {
+      data: [{ id: ids[0], user_id: STAFF, organisation_id: "org-1" }],
+    });
+
+    await approveTimesheets(
+      {},
+      formData({ ids: [ids[0]], managerNote: "Checked against the roster." }),
+    );
+
+    expect(stub.onlyOp("timesheets", "update").payload).toMatchObject({
+      manager_note: "Checked against the roster.",
+    });
+  });
+
+  it("tells each affected person once, not once per timesheet", async () => {
+    stub.on("timesheets", "update", {
+      data: [
+        { id: ids[0], user_id: STAFF, organisation_id: "org-1" },
+        { id: ids[1], user_id: STAFF, organisation_id: "org-1" },
+      ],
+    });
+
+    await approveTimesheets({}, formData({ ids }));
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    // notify() de-duplicates the recipient list itself.
+    expect(vi.mocked(notify).mock.calls[0][0].userIds).toEqual([STAFF, STAFF]);
+  });
+
+  it("refuses an empty selection without touching the database", async () => {
+    const result = await approveTimesheets({}, formData({ ids: [] }));
+
+    expect(result.error).toMatch(/select at least one/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+
+  it("surfaces a database guard, such as approving your own", async () => {
+    stub.on("timesheets", "update", {
+      error: { message: "You may not approve your own timesheet." },
+    });
+
+    const result = await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    // The guards raise rather than matching zero rows, so the real reason
+    // is worth showing rather than a generic failure.
+    expect(result.error).toBe("You may not approve your own timesheet.");
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("reports when nothing matched", async () => {
+    stub.on("timesheets", "update", { data: [] });
+
+    const result = await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    expect(result.error).toMatch(/none of those timesheets/i);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("ignores a non-uuid id rather than sending it to the database", async () => {
+    const result = await approveTimesheets({}, formData({ ids: ["nope"] }));
+
+    expect(result.error).toMatch(/select at least one/i);
+    expect(stub.operations).toHaveLength(0);
   });
 });

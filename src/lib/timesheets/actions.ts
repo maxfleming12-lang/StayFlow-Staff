@@ -736,7 +736,14 @@ export async function approveTimesheets(
         status: "approved",
         approved_by: user.id,
         approved_at: new Date().toISOString(),
-        manager_note: parsed.data.managerNote ?? null,
+        // Only written when a note was actually typed. Sending `null` for an
+        // empty box ERASED whatever note was already there, across every
+        // timesheet in a bulk approval — including the reply a manager wrote
+        // when declining a correction request, which is the only way the
+        // staff member ever sees that answer.
+        ...(parsed.data.managerNote
+          ? { manager_note: parsed.data.managerNote }
+          : {}),
       })
       .in("id", parsed.data.ids)
       .select("id, user_id, organisation_id");
