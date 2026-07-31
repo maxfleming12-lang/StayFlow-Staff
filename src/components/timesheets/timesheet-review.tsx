@@ -11,7 +11,9 @@ import {
   type TimesheetActionState,
 } from "@/lib/timesheets/actions";
 import type { TimesheetRow } from "@/lib/timesheets/queries";
+import { localTimeOf } from "@/lib/timesheets/entry";
 import { TimesheetCard } from "./timesheet-card";
+import { EditHours } from "./edit-hours";
 
 function Pending({ label }: { label: string }) {
   const { pending } = useFormStatus();
@@ -152,36 +154,46 @@ export function TimesheetReview({
           </p>
         </div>
       ) : (
-        <form action={appAction} className="space-y-4">
+        <div className="space-y-4">
           {appState.error && <Alert tone="error">{appState.error}</Alert>}
           {appState.success && <Alert tone="success">{appState.success}</Alert>}
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-            <div>
-              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                {selected.size} of {sheets.length} selected
-              </p>
-              {flagged > 0 && (
-                <p className="text-xs text-amber-700 dark:text-amber-400">
-                  {flagged} left unticked because they need a look.
+          {/*
+            Only the bulk-approve controls live in this form. The cards are
+            deliberately outside it: each one now carries its own Edit hours
+            form, and a form cannot be nested inside another. The tickboxes
+            are controlled React state with no `name`, so they contribute
+            nothing to the submission — the hidden inputs below do.
+          */}
+          <form action={appAction}>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <div>
+                <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                  {selected.size} of {sheets.length} selected
                 </p>
-              )}
+                {flagged > 0 && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    {flagged} left unticked because they need a look.
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  onClick={() => setSelected(new Set(sheets.map((s) => s.id)))}
+                >
+                  Select all
+                </Button>
+                <Pending label={`Approve ${selected.size}`} />
+              </div>
             </div>
-            <div className="flex gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSelected(new Set(sheets.map((s) => s.id)))}
-              >
-                Select all
-              </Button>
-              <Pending label={`Approve ${selected.size}`} />
-            </div>
-          </div>
 
-          {[...selected].map((id) => (
-            <input key={id} type="hidden" name="ids" value={id} />
-          ))}
+            {[...selected].map((id) => (
+              <input key={id} type="hidden" name="ids" value={id} />
+            ))}
+          </form>
 
           <div className="space-y-3">
             {sheets.map((sheet) => (
@@ -196,12 +208,28 @@ export function TimesheetReview({
                   />
                 </label>
                 <div className="min-w-0 flex-1">
-                  <TimesheetCard sheet={sheet} showStaffName />
+                  <TimesheetCard
+                    sheet={sheet}
+                    showStaffName
+                    actions={
+                      <EditHours
+                        timesheetId={sheet.id}
+                        startTime={
+                          sheet.actualStart ? localTimeOf(sheet.actualStart) : ""
+                        }
+                        endTime={
+                          sheet.actualEnd ? localTimeOf(sheet.actualEnd) : ""
+                        }
+                        breakMinutes={sheet.breakMinutes}
+                        isApproved={sheet.status === "approved"}
+                      />
+                    }
+                  />
                 </div>
               </div>
             ))}
           </div>
-        </form>
+        </div>
       )}
 
       <p className="text-xs text-slate-500 dark:text-slate-400">

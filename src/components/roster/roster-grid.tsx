@@ -3,6 +3,7 @@ import { formatHours, formatTime } from "@/lib/format";
 import type { RosterProperty, RosterShift, RosterStaff } from "@/lib/roster/manager-queries";
 import { cn } from "@/lib/utils";
 import { AssignOpenShift } from "./assign-open-shift";
+import { RemoveShift } from "./remove-shift";
 
 /** ISO date key of a shift in the property timezone. */
 function dayKeyOf(startsAt: string): string {
@@ -15,7 +16,13 @@ function dayKeyOf(startsAt: string): string {
 }
 
 /** One shift block inside a day cell. */
-function ShiftBlock({ shift }: { shift: RosterShift }) {
+function ShiftBlock({
+  shift,
+  personName,
+}: {
+  shift: RosterShift;
+  personName: string;
+}) {
   const draft = shift.status === "draft";
 
   return (
@@ -46,6 +53,19 @@ function ShiftBlock({ shift }: { shift: RosterShift }) {
         <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
           Accepted
         </p>
+      )}
+
+      {/*
+        Draft only. A published shift has been sent to the person rostered on,
+        so removing it is not a quiet tidy-up and the server refuses it too.
+      */}
+      {draft && (
+        <RemoveShift
+          compact
+          shiftId={shift.id}
+          label={`${personName}, ${formatTime(shift.startsAt)}–${formatTime(shift.endsAt)}`}
+          consequence="It is still a draft, so nobody has been told about it."
+        />
       )}
     </div>
   );
@@ -171,7 +191,11 @@ export function RosterGrid({
                         ) : (
                           <div className="space-y-1.5">
                             {cell.map((shift) => (
-                              <ShiftBlock key={shift.id} shift={shift} />
+                              <ShiftBlock
+                                key={shift.id}
+                                shift={shift}
+                                personName={person.displayName}
+                              />
                             ))}
                           </div>
                         )}
@@ -197,21 +221,32 @@ export function RosterGrid({
             Unfilled shifts ({openShifts.length})
           </h2>
           <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-            {openShifts.map((shift) => (
-              <li key={shift.id}>
-                <div className="rounded-lg bg-white p-2.5 text-xs dark:bg-slate-900">
-                  <p className="font-medium text-slate-900 dark:text-slate-100">
-                    {formatDayHeading(dayKeyOf(shift.startsAt))} ·{" "}
-                    {formatTime(shift.startsAt)}–{formatTime(shift.endsAt)}
-                  </p>
-                  <p className="text-slate-500 dark:text-slate-400">
-                    {shift.propertyName}
-                    {shift.requiredRole && ` · ${shift.requiredRole}`}
-                  </p>
-                  <AssignOpenShift shiftId={shift.id} staff={staff} />
-                </div>
-              </li>
-            ))}
+            {openShifts.map((shift) => {
+              const when = `${formatDayHeading(dayKeyOf(shift.startsAt))} · ${formatTime(shift.startsAt)}–${formatTime(shift.endsAt)}`;
+              return (
+                <li key={shift.id}>
+                  <div className="rounded-lg bg-white p-2.5 text-xs dark:bg-slate-900">
+                    <p className="font-medium text-slate-900 dark:text-slate-100">
+                      {when}
+                    </p>
+                    <p className="text-slate-500 dark:text-slate-400">
+                      {shift.propertyName}
+                      {shift.requiredRole && ` · ${shift.requiredRole}`}
+                    </p>
+                    <AssignOpenShift shiftId={shift.id} staff={staff} />
+                    <RemoveShift
+                      shiftId={shift.id}
+                      label={`${when} at ${shift.propertyName}`}
+                      consequence={
+                        shift.status === "published"
+                          ? "It is published, so it will also disappear from the shifts staff can pick up."
+                          : "It is still a draft, so nobody has seen it."
+                      }
+                    />
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
