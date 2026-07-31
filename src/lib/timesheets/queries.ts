@@ -1,4 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import {
+  TIMESHEET_VIEWS,
+  TIMESHEET_VIEW_LIMIT,
+  type TimesheetView,
+} from "./views";
 
 /**
  * Timesheet queries.
@@ -84,34 +89,26 @@ export async function getMyTimesheets(limit = 60): Promise<TimesheetRow[]> {
   return (data ?? []).map(map);
 }
 
-/** Timesheets a manager needs to review, oldest first. */
+export {
+  TIMESHEET_VIEWS,
+  TIMESHEET_VIEW_LIMIT,
+  isTimesheetView,
+  type TimesheetView,
+} from "./views";
+
+/** Timesheets in one view, oldest first. */
 export async function getTimesheetsForReview(
-  status?: string,
+  view: TimesheetView = "open",
 ): Promise<TimesheetRow[]> {
   const supabase = await createClient();
 
-  let query = supabase
+  const { data, error } = await supabase
     .from("timesheets")
     .select(SELECT)
+    .in("status", [...TIMESHEET_VIEWS[view].statuses])
     .order("work_date", { ascending: true })
-    .limit(200);
+    .limit(TIMESHEET_VIEW_LIMIT);
 
-  if (status) {
-    query = query.eq(
-      "status",
-      status as "draft" | "submitted" | "manager_review" | "approved",
-    );
-  } else {
-    // Default to what actually needs a decision.
-    query = query.in("status", [
-      "draft",
-      "submitted",
-      "manager_review",
-      "staff_review_requested",
-    ]);
-  }
-
-  const { data, error } = await query;
   if (error) throw new Error(`Could not load timesheets: ${error.message}`);
   return (data ?? []).map(map);
 }

@@ -26,9 +26,15 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-const { createManualTimesheet, updateTimesheetHours, resolveAdjustmentRequest } =
-  await import("./actions");
+const {
+  createManualTimesheet,
+  updateTimesheetHours,
+  resolveAdjustmentRequest,
+  markPeriodExported,
+  reopenExportedPeriod,
+} = await import("./actions");
 const { notify } = await import("@/lib/notifications/deliver");
+const { requireRole } = await import("@/lib/auth/session");
 
 const SHEET = "11111111-1111-4111-8111-111111111111";
 const STAFF = "22222222-2222-4222-8222-222222222222";
@@ -460,5 +466,153 @@ describe("resolveAdjustmentRequest", () => {
 
     expect(result.error).toMatch(/both a start and a finish/i);
     expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+});
+
+describe("markPeriodExported", () => {
+  const period = (over: Record<string, string> = {}) =>
+    formData({ fromDate: "2026-07-13", toDate: "2026-07-26", ...over });
+
+  /** Queue the two head-count queries, then the update. */
+  const counts = (ready: number, pending: number) => {
+    stub.on("timesheets", "select", { count: ready, data: [] });
+    stub.on("timesheets", "select", { count: pending, data: [] });
+  };
+
+  it("confirms before it runs, saying what it will do", async () => {
+    counts(12, 0);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.error).toMatch(/12 approved timesheets/i);
+    // Nothing written until confirmed.
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("warns that unapproved timesheets will be left out", async () => {
+    counts(10, 3);
+
+    const result = await markPeriodExported({}, period());
+
+    // Silently leaving hours behind is an underpayment found on payday.
+    expect(result.error).toMatch(/3 timesheets.*still awaiting a decision/i);
+    expect(result.error).toMatch(/will NOT be included/i);
+  });
+
+  it("marks only approved, unexported rows once confirmed", async () => {
+    counts(2, 0);
+    stub.on("timesheets", "update", { data: [{ id: "a" }, { id: "b" }] });
+
+    const result = await markPeriodExported({}, period({ confirm: "on" }));
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(update.payload).toMatchObject({
+      status: "exported",
+      exported_at: expect.any(String),
+    });
+    // Repeated in the write, so a row edited between count and write is safe.
+    expect(hasFilter(update, "eq", "status", "approved")).toBe(true);
+    expect(hasFilter(update, "is", "exported_at", null)).toBe(true);
+    expect(result.success).toMatch(/Marked 2 timesheets/i);
+  });
+
+  it("scopes the write to the period and property", async () => {
+    counts(1, 0);
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await markPeriodExported(
+      {},
+      period({ confirm: "on", propertyId: PROPERTY }),
+    );
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(hasFilter(update, "gte", "work_date", "2026-07-13")).toBe(true);
+    expect(hasFilter(update, "lte", "work_date", "2026-07-26")).toBe(true);
+    expect(hasFilter(update, "eq", "property_id", PROPERTY)).toBe(true);
+  });
+
+  it("says so when nothing is approved yet", async () => {
+    counts(0, 5);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.error).toMatch(/Nothing in that period is approved yet/i);
+    expect(result.needsConfirmation).toBeUndefined();
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("says so when the period is empty", async () => {
+    counts(0, 0);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.error).toMatch(/no approved timesheets/i);
+  });
+
+  it("reports how many were left behind after marking", async () => {
+    counts(4, 2);
+    stub.on("timesheets", "update", {
+      data: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }],
+    });
+
+    const result = await markPeriodExported({}, period({ confirm: "on" }));
+
+    expect(result.success).toMatch(/Marked 4 timesheets/i);
+    expect(result.success).toMatch(/2 still awaiting a decision were left out/i);
+  });
+
+  it("rejects a backwards range", async () => {
+    const result = await markPeriodExported(
+      {},
+      period({ fromDate: "2026-07-26", toDate: "2026-07-13" }),
+    );
+
+    expect(result.error).toMatch(/cannot be before/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("reopenExportedPeriod", () => {
+  const period = (over: Record<string, string> = {}) =>
+    formData({ fromDate: "2026-07-13", toDate: "2026-07-26", ...over });
+
+  it("is the exact inverse of marking as exported", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    const result = await reopenExportedPeriod({}, period());
+
+    const update = stub.onlyOp("timesheets", "update");
+    // Back to approved with the export cleared; the approval itself stands.
+    expect(update.payload).toEqual({ status: "approved", exported_at: null });
+    expect(hasFilter(update, "eq", "status", "exported")).toBe(true);
+    expect(result.success).toMatch(/Reopened 1 timesheet/i);
+  });
+
+  it("leaves locked timesheets alone", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await reopenExportedPeriod({}, period());
+
+    // Locking is a further step and is not undone here.
+    expect(hasFilter(stub.onlyOp("timesheets", "update"), "is", "locked_at", null)).toBe(
+      true,
+    );
+  });
+
+  it("requires an administrator, not just a manager", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await reopenExportedPeriod({}, period());
+
+    expect(requireRole).toHaveBeenCalledWith("administrator");
+  });
+
+  it("says so when there is nothing to reopen", async () => {
+    stub.on("timesheets", "update", { data: [] });
+
+    const result = await reopenExportedPeriod({}, period());
+
+    expect(result.error).toMatch(/nothing in that period is marked as sent/i);
   });
 });

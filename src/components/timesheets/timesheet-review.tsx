@@ -44,9 +44,16 @@ function needsAttention(sheet: TimesheetRow): boolean {
 export function TimesheetReview({
   sheets,
   properties,
+  readOnly = false,
 }: {
   sheets: TimesheetRow[];
   properties: { id: string; name: string }[];
+  /**
+   * True for a period already sent to payroll. Approving and editing are
+   * both refused by the server there, so showing controls that can only
+   * fail would be worse than showing none.
+   */
+  readOnly?: boolean;
 }) {
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(sheets.filter((s) => !needsAttention(s)).map((s) => s.id)),
@@ -84,7 +91,10 @@ export function TimesheetReview({
 
   return (
     <div className="space-y-5">
-      <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+      <section
+        hidden={readOnly}
+        className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
+      >
         <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Prepare a pay period
         </h2>
@@ -147,10 +157,12 @@ export function TimesheetReview({
       {sheets.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center dark:border-slate-700 dark:bg-slate-900">
           <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-            Nothing waiting for approval
+            {readOnly ? "Nothing here" : "Nothing waiting for approval"}
           </p>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Build a pay period above to bring recorded attendance in.
+            {readOnly
+              ? "No timesheets have been sent to payroll yet."
+              : "Build a pay period above to bring recorded attendance in."}
           </p>
         </div>
       ) : (
@@ -165,7 +177,7 @@ export function TimesheetReview({
             are controlled React state with no `name`, so they contribute
             nothing to the submission — the hidden inputs below do.
           */}
-          <form action={appAction}>
+          <form action={appAction} hidden={readOnly}>
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
               <div>
                 <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
@@ -198,20 +210,23 @@ export function TimesheetReview({
           <div className="space-y-3">
             {sheets.map((sheet) => (
               <div key={sheet.id} className="flex gap-3">
-                <label className="flex items-start pt-4">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(sheet.id)}
-                    onChange={() => toggle(sheet.id)}
-                    aria-label={`Approve ${sheet.staffName} on ${sheet.workDate}`}
-                    className="h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
-                  />
-                </label>
+                {!readOnly && (
+                  <label className="flex items-start pt-4">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(sheet.id)}
+                      onChange={() => toggle(sheet.id)}
+                      aria-label={`Approve ${sheet.staffName} on ${sheet.workDate}`}
+                      className="h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-600"
+                    />
+                  </label>
+                )}
                 <div className="min-w-0 flex-1">
                   <TimesheetCard
                     sheet={sheet}
                     showStaffName
                     actions={
+                      readOnly ? undefined : (
                       <EditHours
                         timesheetId={sheet.id}
                         startTime={
@@ -223,6 +238,7 @@ export function TimesheetReview({
                         breakMinutes={sheet.breakMinutes}
                         isApproved={sheet.status === "approved"}
                       />
+                      )
                     }
                   />
                 </div>
