@@ -7,10 +7,12 @@ import { addIsoDays, localDateTimeToIso, startOfLocalDay } from "@/lib/format";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import { notify } from "@/lib/notifications/deliver";
 import type { ClockEvent, ClockEventType } from "@/lib/clock/state";
-import { generateTimesheet } from "./generate";
+import { generateTimesheet, rosteredHours } from "./generate";
+import { MAX_ENTRY_HOURS, deriveHours, round2 } from "./entry";
 import type { Database } from "@/types/database";
 
 type TimesheetInsert = Database["public"]["Tables"]["timesheets"]["Insert"];
+type TimesheetUpdate = Database["public"]["Tables"]["timesheets"]["Update"];
 
 export interface TimesheetActionState {
   error?: string;
@@ -227,11 +229,6 @@ const manualSchema = z.object({
   confirmDuplicate: z.boolean().optional(),
 });
 
-/** Round to cents-of-an-hour, the precision `paid_hours` stores. */
-function round2(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
 /**
  * Record hours by hand, for when the clock was not used.
  *
@@ -288,34 +285,21 @@ export async function createManualTimesheet(
 
   const input = parsed.data;
 
-  const startIso = localDateTimeToIso(`${input.workDate}T${input.startTime}`);
-  // A finish at or before the start means the shift ran past midnight.
-  const endsNextDay = input.endTime <= input.startTime;
-  const endIso = localDateTimeToIso(
-    `${endsNextDay ? addIsoDays(input.workDate, 1) : input.workDate}T${input.endTime}`,
-  );
+  const derived = deriveHours({
+    workDate: input.workDate,
+    startTime: input.startTime,
+    endTime: input.endTime,
+    breakMinutes: input.breakMinutes,
+  });
 
-  const workedHours =
-    (Date.parse(endIso) - Date.parse(startIso)) / 3_600_000 -
-    input.breakMinutes / 60;
-
-  if (workedHours <= 0) {
+  if (!derived.ok) {
     return {
-      fieldErrors: {
-        breakMinutes: "The break is longer than the shift.",
-      },
-      error: "That leaves no paid time. Check the times and the break.",
+      fieldErrors: { [derived.field]: derived.message },
+      error: derived.message,
       values,
     };
   }
-  if (workedHours > 16) {
-    return {
-      fieldErrors: { endTime: "That is more than 16 hours." },
-      error:
-        "That is longer than any single shift should be. Check the finish time — for an overnight shift, enter the date it started.",
-      values,
-    };
-  }
+  const { startIso, endIso, endsNextDay, paidHours } = derived.value;
 
   try {
     const supabase = await createClient();
@@ -353,7 +337,7 @@ export async function createManualTimesheet(
       actual_start: startIso,
       actual_end: endIso,
       break_minutes: input.breakMinutes,
-      paid_hours: round2(workedHours),
+      paid_hours: paidHours,
       // No rostered window to compare against, so there is no variance to
       // report. Leaving it null is honest; zero would read as "matched".
       variance_hours: null,
@@ -374,9 +358,203 @@ export async function createManualTimesheet(
 
   revalidatePath("/manage/timesheets");
   revalidatePath("/timesheets");
-  return {
-    success: `Recorded ${round2(workedHours)} h for ${input.workDate}.`,
-  };
+  return { success: `Recorded ${paidHours} h for ${input.workDate}.` };
+}
+
+type ServerClient = Awaited<ReturnType<typeof createClient>>;
+
+/**
+ * Variance of corrected hours against what was rostered.
+ *
+ * Null when the day was never rostered — there is nothing to compare to, and
+ * zero would read as "matched the roster".
+ *
+ * The PLANNED unpaid break comes back off the rostered side, which means
+ * reading it from the shift. `generateTimesheet` subtracts it when variance
+ * is first computed, so leaving it out here would compare against a longer
+ * rostered day and overstate every shortfall by the length of the break.
+ */
+async function varianceAgainstRoster(
+  supabase: ServerClient,
+  sheet: {
+    rostered_start: string | null;
+    rostered_end: string | null;
+    shift_id: string | null;
+  },
+  paidHours: number,
+): Promise<number | null> {
+  if (!sheet.rostered_start || !sheet.rostered_end) return null;
+
+  let plannedUnpaid = 0;
+  if (sheet.shift_id) {
+    const { data: breaks } = await supabase
+      .from("shift_breaks")
+      .select("duration_minutes, is_paid")
+      .eq("shift_id", sheet.shift_id);
+
+    plannedUnpaid = (breaks ?? [])
+      .filter((b) => !b.is_paid)
+      .reduce((total, b) => total + Number(b.duration_minutes ?? 0), 0);
+  }
+
+  return round2(
+    paidHours -
+      rosteredHours({
+        startsAt: sheet.rostered_start,
+        endsAt: sheet.rostered_end,
+        unpaidBreakMinutes: plannedUnpaid,
+      }),
+  );
+}
+
+const editHoursSchema = z.object({
+  timesheetId: z.string().uuid(),
+  startTime: z.string().regex(/^\d{2}:\d{2}$/, "Enter a start time."),
+  endTime: z.string().regex(/^\d{2}:\d{2}$/, "Enter a finish time."),
+  breakMinutes: z.number().int().min(0).max(600),
+  managerNote: z.string().trim().max(500).optional(),
+});
+
+/**
+ * Correct the hours on an existing timesheet.
+ *
+ * Until this existed, recorded hours could never be changed: every write of
+ * `actual_start`, `actual_end` and `paid_hours` was an INSERT. A mistyped
+ * manual entry or a missed clock-out reached payroll with no way to fix it,
+ * and the staff correction route had nowhere to land.
+ *
+ * Editing an already-approved timesheet sends it BACK to `manager_review`
+ * and clears the approval. An approval is a statement about particular
+ * figures; silently keeping it against different ones would misrepresent
+ * who signed off on what.
+ *
+ * Clock events are untouched. They are append-only evidence, and a
+ * corrected timesheet must never destroy the record it was corrected from —
+ * the original remains recoverable by regenerating from the events.
+ */
+export async function updateTimesheetHours(
+  _prev: TimesheetActionState,
+  formData: FormData,
+): Promise<TimesheetActionState> {
+  const user = await requireRole("manager");
+
+  const breakRaw = formData.get("breakMinutes");
+  const parsed = editHoursSchema.safeParse({
+    timesheetId: formData.get("timesheetId"),
+    startTime: formData.get("startTime"),
+    endTime: formData.get("endTime"),
+    breakMinutes: breakRaw ? Number(breakRaw) : 0,
+    managerNote: (formData.get("managerNote") as string) || undefined,
+  });
+
+  if (!parsed.success) {
+    const fieldErrors: Record<string, string> = {};
+    for (const issue of parsed.error.issues) {
+      const key = String(issue.path[0] ?? "form");
+      fieldErrors[key] ??= issue.message;
+    }
+    return { fieldErrors, error: "Check the highlighted fields." };
+  }
+
+  const input = parsed.data;
+
+  try {
+    const supabase = await createClient();
+
+    const { data: sheet, error: readError } = await supabase
+      .from("timesheets")
+      .select(
+        "id, user_id, work_date, status, locked_at, exported_at, rostered_start, rostered_end, shift_id",
+      )
+      .eq("id", input.timesheetId)
+      .maybeSingle();
+
+    if (readError) return { error: "Could not read that timesheet." };
+    if (!sheet) return { error: "That timesheet is no longer available." };
+    if (sheet.locked_at) {
+      return {
+        error:
+          "This timesheet is locked. Ask an administrator to reopen it before changing the hours.",
+      };
+    }
+    if (sheet.exported_at) {
+      return {
+        error:
+          "This timesheet has already gone to payroll. Correct it there, or ask an administrator to reopen it.",
+      };
+    }
+
+    const derived = deriveHours({
+      workDate: String(sheet.work_date),
+      startTime: input.startTime,
+      endTime: input.endTime,
+      breakMinutes: input.breakMinutes,
+    });
+
+    if (!derived.ok) {
+      return {
+        fieldErrors: { [derived.field]: derived.message },
+        error: derived.message,
+      };
+    }
+
+    const varianceHours = await varianceAgainstRoster(
+      supabase,
+      sheet,
+      derived.value.paidHours,
+    );
+
+    const wasApproved = sheet.status === "approved";
+
+    // Built as an explicitly typed object rather than with conditional
+    // spreads inside `.update()`, so the columns being written are checked
+    // against the generated row type and are legible in one place.
+    const patch: TimesheetUpdate = {
+      actual_start: derived.value.startIso,
+      actual_end: derived.value.endIso,
+      break_minutes: input.breakMinutes,
+      paid_hours: derived.value.paidHours,
+      variance_hours: varianceHours,
+      // Hours now exist, so a no-show is no longer the right description.
+      is_no_show: false,
+    };
+
+    if (wasApproved) {
+      patch.status = "manager_review";
+      patch.approved_by = null;
+      patch.approved_at = null;
+    }
+    if (input.managerNote) patch.manager_note = input.managerNote;
+
+    const { error } = await supabase
+      .from("timesheets")
+      .update(patch)
+      .eq("id", input.timesheetId)
+      .select("id, user_id")
+      .maybeSingle();
+
+    if (error) return { error: `Could not save the change: ${error.message}` };
+
+    // The staff member is told, because their pay just changed.
+    await notify({
+      organisationId: user.organisationId,
+      userIds: [String(sheet.user_id)],
+      category: "timesheet_correction",
+      title: "Your recorded hours were changed",
+      body: `Your hours for ${sheet.work_date} were updated. Open StayFlow to check them.`,
+      deepLink: "/timesheets",
+    });
+
+    revalidatePath("/manage/timesheets");
+    revalidatePath("/timesheets");
+    return {
+      success: wasApproved
+        ? `Updated to ${derived.value.paidHours} h. The approval was cleared, so it needs approving again.`
+        : `Updated to ${derived.value.paidHours} h.`,
+    };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -429,7 +607,10 @@ export async function acknowledgeTimesheet(
 const correctionSchema = z.object({
   timesheetId: z.string().uuid(),
   requestedStart: z.string().optional(),
-  requestedEnd: z.string().optional(),
+  requestedEnd: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/, "Enter a finish time as hh:mm.")
+    .optional(),
   requestedBreakMinutes: z.coerce.number().int().min(0).max(600).optional(),
   explanation: z
     .string()
@@ -472,15 +653,34 @@ export async function requestCorrection(
 
     if (!sheet) return { error: "That timesheet is no longer available." };
 
+    // The form sends wall-clock times ("09:00") and these columns are
+    // timestamptz. Handing the bare string to Postgres stamped it onto
+    // TODAY in the session timezone, so a correction for last Tuesday was
+    // stored against this morning — anchor it to the timesheet's own date
+    // in the property timezone instead.
+    const workDate = String(sheet.work_date);
+    const bothTimes = parsed.data.requestedStart && parsed.data.requestedEnd;
+    const overnight =
+      bothTimes && parsed.data.requestedEnd! <= parsed.data.requestedStart!;
+
+    const requestedStart = parsed.data.requestedStart
+      ? localDateTimeToIso(`${workDate}T${parsed.data.requestedStart}`)
+      : null;
+    const requestedEnd = parsed.data.requestedEnd
+      ? localDateTimeToIso(
+          `${overnight ? addIsoDays(workDate, 1) : workDate}T${parsed.data.requestedEnd}`,
+        )
+      : null;
+
     const { error } = await supabase
       .from("timesheet_adjustment_requests")
       .insert({
         organisation_id: user.organisationId,
         timesheet_id: parsed.data.timesheetId,
         user_id: user.id,
-        requested_date: sheet.work_date,
-        requested_start: parsed.data.requestedStart || null,
-        requested_end: parsed.data.requestedEnd || null,
+        requested_date: workDate,
+        requested_start: requestedStart,
+        requested_end: requestedEnd,
         requested_break_minutes: parsed.data.requestedBreakMinutes ?? null,
         explanation: parsed.data.explanation,
         status: "open",
@@ -564,5 +764,196 @@ export async function approveTimesheets(
     };
   } catch {
     return { error: "Cannot reach StayFlow right now." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Manager: acting on a staff correction request                       */
+/* ------------------------------------------------------------------ */
+
+const resolveSchema = z.object({
+  requestId: z.string().uuid(),
+  decision: z.enum(["approved", "declined"]),
+  managerNote: z.string().trim().max(500).optional(),
+});
+
+/**
+ * Approve or decline a staff correction request.
+ *
+ * `requestCorrection` has always written these rows, but nothing ever read
+ * them: a staff member could report that their hours were wrong and the
+ * request would sit in the table forever, invisible. This closes that loop.
+ *
+ * Approving APPLIES the requested figures to the timesheet rather than just
+ * marking the request agreed — a request marked approved while the hours
+ * stayed wrong is the same dead end in a different costume.
+ *
+ * The requested times were stored as instants against the timesheet's own
+ * date, so they are written straight through; only `paid_hours` is
+ * recomputed, from the same arithmetic every other path uses.
+ */
+export async function resolveAdjustmentRequest(
+  _prev: TimesheetActionState,
+  formData: FormData,
+): Promise<TimesheetActionState> {
+  const user = await requireRole("manager");
+
+  const parsed = resolveSchema.safeParse({
+    requestId: formData.get("requestId"),
+    decision: formData.get("decision"),
+    managerNote: (formData.get("managerNote") as string) || undefined,
+  });
+
+  if (!parsed.success) return { error: "That request could not be identified." };
+  const { requestId, decision, managerNote } = parsed.data;
+
+  try {
+    const supabase = await createClient();
+
+    const { data: request, error: readError } = await supabase
+      .from("timesheet_adjustment_requests")
+      .select(
+        "id, timesheet_id, user_id, status, requested_start, requested_end, requested_break_minutes",
+      )
+      .eq("id", requestId)
+      .maybeSingle();
+
+    if (readError) return { error: "Could not read that request." };
+    if (!request) return { error: "That request is no longer available." };
+    if (request.status !== "open") {
+      return { error: "That request has already been dealt with." };
+    }
+
+    if (decision === "approved") {
+      if (!request.timesheet_id) {
+        return {
+          error:
+            "This request is not attached to a timesheet. Enter the hours manually, then decline it with a note.",
+        };
+      }
+
+      const { data: sheet } = await supabase
+        .from("timesheets")
+        .select(
+          "id, break_minutes, locked_at, exported_at, status, work_date, rostered_start, rostered_end, shift_id",
+        )
+        .eq("id", request.timesheet_id)
+        .maybeSingle();
+
+      if (!sheet) return { error: "That timesheet is no longer available." };
+      if (sheet.locked_at || sheet.exported_at) {
+        return {
+          error:
+            "That timesheet has gone to payroll. Ask an administrator to reopen it before applying this.",
+        };
+      }
+
+      // Only the fields the staff member actually filled in are applied; the
+      // rest of the timesheet stays as recorded.
+      const startIso = request.requested_start
+        ? String(request.requested_start)
+        : null;
+      const endIso = request.requested_end ? String(request.requested_end) : null;
+      const breakMinutes =
+        request.requested_break_minutes ?? Number(sheet.break_minutes ?? 0);
+
+      if (!startIso || !endIso) {
+        return {
+          error:
+            "This request did not include both a start and a finish. Edit the hours directly, then decline it with a note.",
+        };
+      }
+
+      const paidHours = round2(
+        (Date.parse(endIso) - Date.parse(startIso)) / 3_600_000 -
+          breakMinutes / 60,
+      );
+
+      if (paidHours <= 0 || paidHours > MAX_ENTRY_HOURS) {
+        return {
+          error:
+            "Those times do not make a sensible shift. Edit the hours directly instead.",
+        };
+      }
+
+      const { error: applyError } = await supabase
+        .from("timesheets")
+        .update({
+          actual_start: startIso,
+          actual_end: endIso,
+          break_minutes: breakMinutes,
+          paid_hours: paidHours,
+          // Recomputed, not left alone: the old figure was derived from the
+          // hours this correction is replacing.
+          variance_hours: await varianceAgainstRoster(
+            supabase,
+            sheet,
+            paidHours,
+          ),
+          is_no_show: false,
+          // Corrected figures need looking at again, even if this timesheet
+          // had already been approved on the old ones.
+          status: "manager_review" as const,
+          approved_by: null,
+          approved_at: null,
+        })
+        .eq("id", request.timesheet_id);
+
+      if (applyError) {
+        return { error: `Could not apply the correction: ${applyError.message}` };
+      }
+    }
+
+    const { error: closeError } = await supabase
+      .from("timesheet_adjustment_requests")
+      .update({
+        status: decision,
+        reviewed_by: user.id,
+        reviewed_at: new Date().toISOString(),
+        manager_note: managerNote ?? null,
+      })
+      .eq("id", requestId)
+      .eq("status", "open");
+
+    if (closeError) {
+      return { error: `Could not close the request: ${closeError.message}` };
+    }
+
+    // Mirror the reply onto the timesheet itself. Nothing shows staff the
+    // request rows, but `TimesheetCard` already renders `manager_note` — so
+    // without this a declined correction is answered into a void, which is
+    // the dead end this whole action exists to remove.
+    if (managerNote && request.timesheet_id) {
+      await supabase
+        .from("timesheets")
+        .update({ manager_note: managerNote })
+        .eq("id", request.timesheet_id);
+    }
+
+    await notify({
+      organisationId: user.organisationId,
+      userIds: [String(request.user_id)],
+      category: "timesheet_correction",
+      title:
+        decision === "approved"
+          ? "Your correction was applied"
+          : "Your correction was not applied",
+      body:
+        decision === "approved"
+          ? "Your recorded hours have been updated. Open StayFlow to check them."
+          : "Your manager has responded to your correction request. Open StayFlow to read it.",
+      deepLink: "/timesheets",
+    });
+
+    revalidatePath("/manage/timesheets");
+    revalidatePath("/timesheets");
+    return {
+      success:
+        decision === "approved"
+          ? "Correction applied. The timesheet needs approving again."
+          : "Request declined.",
+    };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
   }
 }

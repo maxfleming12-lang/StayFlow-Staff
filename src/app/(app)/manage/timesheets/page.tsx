@@ -1,11 +1,15 @@
 import type { Metadata } from "next";
 import { requireRole } from "@/lib/auth/session";
 import { createClient } from "@/lib/supabase/server";
-import { getTimesheetsForReview } from "@/lib/timesheets/queries";
+import {
+  getOpenAdjustmentRequests,
+  getTimesheetsForReview,
+} from "@/lib/timesheets/queries";
 import { getTeam } from "@/lib/team/queries";
 import { DEFAULT_TIMEZONE } from "@/lib/format";
 import { TimesheetReview } from "@/components/timesheets/timesheet-review";
 import { ManualTimesheet } from "@/components/timesheets/manual-timesheet";
+import { CorrectionRequests } from "@/components/timesheets/correction-requests";
 
 export const metadata: Metadata = { title: "Timesheets · StayFlow Staff" };
 export const dynamic = "force-dynamic";
@@ -20,7 +24,7 @@ export default async function ManageTimesheetsPage() {
   await requireRole("manager");
 
   const supabase = await createClient();
-  const [sheets, propertyRes, team] = await Promise.all([
+  const [sheets, propertyRes, team, corrections] = await Promise.all([
     getTimesheetsForReview(),
     supabase
       .from("properties")
@@ -29,6 +33,7 @@ export default async function ManageTimesheetsPage() {
       .is("archived_at", null)
       .order("name"),
     getTeam(),
+    getOpenAdjustmentRequests(),
   ]);
 
   if (propertyRes.error) {
@@ -59,6 +64,8 @@ export default async function ManageTimesheetsPage() {
           Recorded hours waiting for approval.
         </p>
       </div>
+
+      <CorrectionRequests requests={corrections} />
 
       <ManualTimesheet
         properties={properties}

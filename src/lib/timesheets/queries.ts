@@ -115,3 +115,129 @@ export async function getTimesheetsForReview(
   if (error) throw new Error(`Could not load timesheets: ${error.message}`);
   return (data ?? []).map(map);
 }
+
+const ADJUSTMENT_SELECT = `id, timesheet_id, user_id, requested_date,
+  requested_start, requested_end, requested_break_minutes, explanation,
+  created_at,
+  profiles!timesheet_adjustment_requests_profile_fk ( preferred_name, legal_first_name, legal_last_name )`;
+
+/** A staff correction request as the manager queue needs it. */
+export interface AdjustmentRequest {
+  id: string;
+  timesheetId: string | null;
+  userId: string;
+  staffName: string;
+  requestedDate: string | null;
+  requestedStart: string | null;
+  requestedEnd: string | null;
+  requestedBreakMinutes: number | null;
+  explanation: string;
+  createdAt: string;
+  /** The hours currently recorded, for comparison. Null if unattached. */
+  current: {
+    actualStart: string | null;
+    actualEnd: string | null;
+    breakMinutes: number;
+    paidHours: number | null;
+    status: string;
+    lockedAt: string | null;
+    exportedAt: string | null;
+  } | null;
+}
+
+/**
+ * Open correction requests waiting on a manager.
+ *
+ * These rows have been written since the timesheet feature shipped and were
+ * never read by anything, so a staff member reporting wrong hours got no
+ * response. RLS (`adjustment_write_manager`) scopes them to staff the
+ * caller actually manages.
+ */
+export async function getOpenAdjustmentRequests(): Promise<AdjustmentRequest[]> {
+  const supabase = await createClient();
+
+  // Two plain queries rather than one nested embed. postgrest-js parses the
+  // select string in the type system, and deep embeds get expensive there
+  // for no runtime gain; the second lookup is keyed and cheap.
+  const { data, error } = await supabase
+    .from("timesheet_adjustment_requests")
+    .select(ADJUSTMENT_SELECT)
+    .eq("status", "open")
+    .order("created_at", { ascending: true })
+    .limit(100);
+
+  if (error) {
+    throw new Error(`Could not load correction requests: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as unknown as Record<string, unknown>[];
+
+  const sheetIds = [
+    ...new Set(
+      rows
+        .map((row) => row.timesheet_id)
+        .filter((id): id is string => typeof id === "string"),
+    ),
+  ];
+
+  const sheetById = new Map<string, Record<string, unknown>>();
+  if (sheetIds.length > 0) {
+    const { data: sheetData, error: sheetError } = await supabase
+      .from("timesheets")
+      .select(
+        "id, actual_start, actual_end, break_minutes, paid_hours, status, locked_at, exported_at",
+      )
+      .in("id", sheetIds);
+
+    if (sheetError) {
+      throw new Error(
+        `Could not load the timesheets behind those requests: ${sheetError.message}`,
+      );
+    }
+    for (const sheet of sheetData ?? []) {
+      sheetById.set(String(sheet.id), sheet as Record<string, unknown>);
+    }
+  }
+
+  return rows.map((record) => {
+    const profile = one(record.profiles);
+    const sheet =
+      typeof record.timesheet_id === "string"
+        ? (sheetById.get(record.timesheet_id) ?? null)
+        : null;
+
+    return {
+      id: String(record.id),
+      timesheetId: (record.timesheet_id as string | null) ?? null,
+      userId: String(record.user_id),
+      staffName: profile
+        ? String(
+            (profile.preferred_name as string | null)?.trim() ||
+              `${profile.legal_first_name ?? ""} ${profile.legal_last_name ?? ""}`.trim() ||
+              "Unknown",
+          )
+        : "Unknown",
+      requestedDate: (record.requested_date as string | null) ?? null,
+      requestedStart: (record.requested_start as string | null) ?? null,
+      requestedEnd: (record.requested_end as string | null) ?? null,
+      requestedBreakMinutes:
+        record.requested_break_minutes == null
+          ? null
+          : Number(record.requested_break_minutes),
+      explanation: String(record.explanation ?? ""),
+      createdAt: String(record.created_at),
+      current: sheet
+        ? {
+            actualStart: (sheet.actual_start as string | null) ?? null,
+            actualEnd: (sheet.actual_end as string | null) ?? null,
+            breakMinutes: Number(sheet.break_minutes ?? 0),
+            paidHours:
+              sheet.paid_hours == null ? null : Number(sheet.paid_hours),
+            status: String(sheet.status ?? ""),
+            lockedAt: (sheet.locked_at as string | null) ?? null,
+            exportedAt: (sheet.exported_at as string | null) ?? null,
+          }
+        : null,
+    };
+  });
+}
