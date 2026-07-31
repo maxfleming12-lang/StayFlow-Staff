@@ -241,3 +241,49 @@ export async function getOpenAdjustmentRequests(): Promise<AdjustmentRequest[]> 
     };
   });
 }
+
+/**
+ * Every timesheet in a date range, for export.
+ *
+ * Deliberately unlike `getTimesheetsForReview`: that one shows what still
+ * needs a decision and caps at 200 rows. Payroll needs the whole period
+ * including everything already approved, so this filters by date instead of
+ * status and pages through rather than truncating — a fortnight for two
+ * motels can exceed any single-page limit, and a silently short export is
+ * an underpayment.
+ *
+ * RLS scopes the result to properties the caller manages.
+ */
+export async function getTimesheetsForExport(
+  fromDate: string,
+  toDate: string,
+  propertyId?: string,
+): Promise<TimesheetRow[]> {
+  const supabase = await createClient();
+  const PAGE = 1000;
+  const rows: TimesheetRow[] = [];
+
+  for (let offset = 0; ; offset += PAGE) {
+    let query = supabase
+      .from("timesheets")
+      .select(SELECT)
+      .gte("work_date", fromDate)
+      .lte("work_date", toDate)
+      .order("work_date", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+
+    if (propertyId) query = query.eq("property_id", propertyId);
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Could not load timesheets to export: ${error.message}`);
+    }
+
+    const page = data ?? [];
+    rows.push(...page.map(map));
+    if (page.length < PAGE) break;
+  }
+
+  return rows;
+}

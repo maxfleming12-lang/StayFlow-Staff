@@ -6,9 +6,11 @@ import {
   getTimesheetsForReview,
 } from "@/lib/timesheets/queries";
 import { getTeam } from "@/lib/team/queries";
-import { DEFAULT_TIMEZONE } from "@/lib/format";
 import { TimesheetReview } from "@/components/timesheets/timesheet-review";
 import { ManualTimesheet } from "@/components/timesheets/manual-timesheet";
+import { TimesheetExport } from "@/components/timesheets/timesheet-export";
+import { TimesheetPrintTable } from "@/components/timesheets/timesheet-print-table";
+import { DEFAULT_TIMEZONE, addIsoDays } from "@/lib/format";
 import { CorrectionRequests } from "@/components/timesheets/correction-requests";
 
 export const metadata: Metadata = { title: "Timesheets · StayFlow Staff" };
@@ -54,9 +56,12 @@ export default async function ManageTimesheetsPage() {
     timeZone: DEFAULT_TIMEZONE,
   }).format(new Date());
 
+  // A fortnight back is the usual pay period at both motels.
+  const fortnightAgo = addIsoDays(today, -13);
+
   return (
     <div className="mx-auto max-w-3xl space-y-5">
-      <div>
+      <div data-print-hide>
         <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
           Timesheets
         </h1>
@@ -65,17 +70,34 @@ export default async function ManageTimesheetsPage() {
         </p>
       </div>
 
-      <CorrectionRequests requests={corrections} />
+      <div data-print-hide className="space-y-5">
+        <CorrectionRequests requests={corrections} />
+      </div>
 
-      <ManualTimesheet
+      <TimesheetExport
         properties={properties}
-        staff={team
-          .filter((member) => member.isActive)
-          .map((member) => ({ id: member.id, displayName: member.displayName }))}
-        today={today}
+        defaultFrom={fortnightAgo}
+        defaultTo={today}
       />
 
-      <TimesheetReview sheets={sheets} properties={properties} />
+      <TimesheetPrintTable
+        sheets={sheets}
+        heading={`Timesheets awaiting approval — printed ${today}`}
+      />
+
+      <div data-print-hide className="space-y-5">
+        <ManualTimesheet
+          properties={properties}
+          staff={team
+            .filter((member) => member.isActive)
+            .map((member) => ({ id: member.id, displayName: member.displayName }))}
+          today={today}
+        />
+      </div>
+
+      <div data-print-hide className="space-y-5">
+        <TimesheetReview sheets={sheets} properties={properties} />
+      </div>
     </div>
   );
 }
