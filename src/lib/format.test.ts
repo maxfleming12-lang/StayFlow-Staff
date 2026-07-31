@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { addIsoDays, localDateTimeToIso, startOfLocalDay } from "./format";
+import {
+  addIsoDays,
+  localDateTimeToIso,
+  localDateTimeValue,
+  startOfLocalDay,
+} from "./format";
 
 /**
  * These assertions are only meaningful because vitest pins TZ=UTC. On a
@@ -38,6 +43,38 @@ describe("localDateTimeToIso", () => {
   it("rejects a value it cannot read rather than returning Invalid Date", () => {
     expect(() => localDateTimeToIso("28/07/2026 9am")).toThrow(RangeError);
     expect(() => localDateTimeToIso("")).toThrow(RangeError);
+  });
+});
+
+describe("localDateTimeValue", () => {
+  it("reads an instant back as the value that produced it, in winter", () => {
+    expect(localDateTimeValue("2026-07-27T23:00:00.000Z")).toBe(
+      "2026-07-28T09:00",
+    );
+  });
+
+  it("reads an instant back correctly under daylight saving", () => {
+    expect(localDateTimeValue("2026-01-19T22:00:00.000Z")).toBe(
+      "2026-01-20T09:00",
+    );
+  });
+
+  it("round-trips with localDateTimeToIso", () => {
+    for (const local of [
+      "2026-07-28T09:00",
+      "2026-01-20T17:30",
+      "2026-10-04T23:45", // the day Sydney springs forward
+      "2026-04-05T02:30", // an ambiguous hour on the day it falls back
+      "2026-12-31T00:00",
+    ]) {
+      expect(localDateTimeValue(localDateTimeToIso(local))).toBe(local);
+    }
+  });
+
+  it("renders midnight as 00:00, never 24:00", () => {
+    expect(localDateTimeValue(localDateTimeToIso("2026-07-28T00:00"))).toBe(
+      "2026-07-28T00:00",
+    );
   });
 });
 

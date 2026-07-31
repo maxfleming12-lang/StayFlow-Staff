@@ -10,12 +10,13 @@ import {
   weekDates,
   weekStart,
 } from "@/lib/roster/week";
-import { formatCurrency, formatHours } from "@/lib/format";
+import { formatCurrency, formatHours, localDateTimeValue } from "@/lib/format";
 import { hospitalityCasualEstimatedCost } from "@/lib/roster/hours";
+import { Alert } from "@/components/ui/alert";
 import { RosterGrid } from "@/components/roster/roster-grid";
 import { PrintRosterButton } from "@/components/roster/print-roster-button";
 import { PublishRoster } from "@/components/roster/publish-roster";
-import { ShiftForm } from "@/components/roster/shift-form";
+import { ShiftForm, type EditableShift } from "@/components/roster/shift-form";
 import { WeekTools } from "@/components/roster/week-tools";
 import { getTemplates } from "@/lib/roster/template-actions";
 
@@ -35,10 +36,10 @@ export const dynamic = "force-dynamic";
 export default async function ManageRosterPage({
   searchParams,
 }: {
-  searchParams: Promise<{ week?: string; property?: string }>;
+  searchParams: Promise<{ week?: string; property?: string; edit?: string }>;
 }) {
   const user = await requireRole("manager");
-  const { week, property } = await searchParams;
+  const { week, property, edit } = await searchParams;
 
   const current = week && /^\d{4}-\d{2}-\d{2}$/.test(week) ? week : weekStart();
   const roster = await getRosterWeek(current, property);
@@ -63,6 +64,36 @@ export default async function ManageRosterPage({
 
   const hrefFor = (w: string) =>
     `/manage/roster?week=${w}${property ? `&property=${property}` : ""}`;
+
+  // Editing is a URL state, so it survives a reload and needs no client
+  // state shared between the form and the grid.
+  const editHrefFor = (shiftId: string) =>
+    `${hrefFor(current)}&edit=${shiftId}#edit-shift`;
+
+  const editing = edit ? roster.shifts.find((s) => s.id === edit) : undefined;
+  const staffNameOf = new Map(roster.staff.map((s) => [s.id, s.displayName]));
+
+  // Times are converted to property-local form HERE, on the server, so the
+  // datetime-local inputs show the manager the hours they actually typed
+  // rather than the UTC instants stored.
+  const editableShift: EditableShift | undefined = editing
+    ? {
+        id: editing.id,
+        propertyId: editing.propertyId,
+        userId: editing.userId,
+        startsAt: localDateTimeValue(editing.startsAt),
+        endsAt: localDateTimeValue(editing.endsAt),
+        breakMinutes: editing.breaks
+          .filter((b) => !b.isPaid)
+          .reduce((total, b) => total + b.durationMinutes, 0),
+        requiredRole: editing.requiredRole ?? "",
+        notes: editing.notes ?? "",
+        status: editing.status,
+        staffName: editing.userId
+          ? (staffNameOf.get(editing.userId) ?? null)
+          : null,
+      }
+    : undefined;
 
   return (
     <div className="roster-print-root space-y-5">
@@ -181,11 +212,23 @@ export default async function ManageRosterPage({
         </div>
       </dl>
 
-      <div data-print-hide>
+      <div data-print-hide id="edit-shift">
+        {edit && !editing && (
+          <div className="mb-3">
+            <Alert tone="warning">
+              That shift is not in this week, or has been removed.{" "}
+              <Link href={hrefFor(current)} className="underline">
+                Back to the roster
+              </Link>
+            </Alert>
+          </div>
+        )}
         <ShiftForm
           properties={roster.properties}
           staff={roster.staff}
           defaultDate={days[0]}
+          shift={editableShift}
+          cancelHref={hrefFor(current)}
         />
       </div>
 
@@ -195,6 +238,7 @@ export default async function ManageRosterPage({
         shifts={roster.shifts}
         properties={roster.properties}
         weekStartDate={current}
+        editHrefFor={editHrefFor}
       />
 
       <div data-print-hide>

@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { Pencil } from "lucide-react";
 import { formatDayHeading, isToday } from "@/lib/roster/week";
 import { formatHours, formatTime } from "@/lib/format";
 import type { RosterProperty, RosterShift, RosterStaff } from "@/lib/roster/manager-queries";
@@ -19,9 +21,11 @@ function dayKeyOf(startsAt: string): string {
 function ShiftBlock({
   shift,
   personName,
+  editHref,
 }: {
   shift: RosterShift;
   personName: string;
+  editHref: string;
 }) {
   const draft = shift.status === "draft";
 
@@ -55,18 +59,33 @@ function ShiftBlock({
         </p>
       )}
 
-      {/*
-        Draft only. A published shift has been sent to the person rostered on,
-        so removing it is not a quiet tidy-up and the server refuses it too.
-      */}
-      {draft && (
-        <RemoveShift
-          compact
-          shiftId={shift.id}
-          label={`${personName}, ${formatTime(shift.startsAt)}–${formatTime(shift.endsAt)}`}
-          consequence="It is still a draft, so nobody has been told about it."
-        />
-      )}
+      <div className="mt-1 flex flex-wrap items-center gap-1" data-print-hide>
+        {/* Editing works on published shifts too — the change is announced. */}
+        <Link
+          href={editHref}
+          className="inline-flex h-7 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700"
+        >
+          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+          Edit
+          <span className="sr-only">
+            {" "}
+            the shift for {personName} at {formatTime(shift.startsAt)}
+          </span>
+        </Link>
+
+        {/*
+          Removing is draft only. A published shift has been sent to the person
+          rostered on, so it is not a quiet tidy-up and the server refuses it.
+        */}
+        {draft && (
+          <RemoveShift
+            compact
+            shiftId={shift.id}
+            label={`${personName}, ${formatTime(shift.startsAt)}–${formatTime(shift.endsAt)}`}
+            consequence="It is still a draft, so nobody has been told about it."
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -84,12 +103,15 @@ export function RosterGrid({
   shifts,
   properties,
   weekStartDate,
+  editHrefFor,
 }: {
   days: string[];
   staff: RosterStaff[];
   shifts: RosterShift[];
   properties: RosterProperty[];
   weekStartDate: string;
+  /** Builds the ?edit= link for a shift, preserving week and property. */
+  editHrefFor: (shiftId: string) => string;
 }) {
   // Index shifts by staff and day so each cell is a lookup, not a filter.
   const byStaffDay = new Map<string, RosterShift[]>();
@@ -195,6 +217,7 @@ export function RosterGrid({
                                 key={shift.id}
                                 shift={shift}
                                 personName={person.displayName}
+                                editHref={editHrefFor(shift.id)}
                               />
                             ))}
                           </div>
@@ -234,6 +257,13 @@ export function RosterGrid({
                       {shift.requiredRole && ` · ${shift.requiredRole}`}
                     </p>
                     <AssignOpenShift shiftId={shift.id} staff={staff} />
+                    <Link
+                      href={editHrefFor(shift.id)}
+                      className="mt-2 inline-flex h-8 items-center gap-1 rounded px-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700"
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      Edit<span className="sr-only"> {when}</span>
+                    </Link>
                     <RemoveShift
                       shiftId={shift.id}
                       label={`${when} at ${shift.propertyName}`}

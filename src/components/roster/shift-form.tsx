@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
+import Link from "next/link";
 import { AlertTriangle, Info, Plus } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,29 @@ import type {
 } from "@/lib/roster/manager-queries";
 import type { Conflict } from "@/lib/roster/conflicts";
 
-function SubmitButton({ needsOverride }: { needsOverride: boolean }) {
+/** An existing shift, with its times already in property-local form. */
+export interface EditableShift {
+  id: string;
+  propertyId: string;
+  userId: string | null;
+  /** `datetime-local` value, local to the property. */
+  startsAt: string;
+  endsAt: string;
+  breakMinutes: number;
+  requiredRole: string;
+  notes: string;
+  status: string;
+  /** Who holds it, for the published-change warning. */
+  staffName: string | null;
+}
+
+function SubmitButton({
+  needsOverride,
+  editing,
+}: {
+  needsOverride: boolean;
+  editing: boolean;
+}) {
   const { pending } = useFormStatus();
   return (
     <Button type="submit" disabled={pending} aria-busy={pending}>
@@ -24,7 +47,9 @@ function SubmitButton({ needsOverride }: { needsOverride: boolean }) {
         ? "Saving…"
         : needsOverride
           ? "Roster anyway"
-          : "Add to draft roster"}
+          : editing
+            ? "Save changes"
+            : "Add to draft roster"}
     </Button>
   );
 }
@@ -70,29 +95,41 @@ function ConflictList({ conflicts }: { conflicts: Conflict[] }) {
  * it against the shift. A motel manager routinely knows something the roster
  * does not — that the staff member offered to cover, that the leave was
  * cancelled verbally — so the system asks rather than refuses.
+ *
+ * Editing is driven by an `?edit=<id>` search param rather than client state
+ * shared with the grid. The form stays full width at the top of the page
+ * instead of being squeezed into a roster cell, the grid stays a server
+ * component, and an edit link survives a page reload.
  */
 export function ShiftForm({
   properties,
   staff,
   defaultDate,
+  shift,
+  cancelHref,
 }: {
   properties: RosterProperty[];
   staff: RosterStaff[];
   defaultDate: string;
+  /** Present when editing an existing shift. */
+  shift?: EditableShift;
+  /** Where Cancel returns to, when editing. */
+  cancelHref?: string;
 }) {
+  const editing = Boolean(shift);
   const [open, setOpen] = useState(false);
   const [state, formAction] = useActionState<RosterActionState, FormData>(
     saveShift,
     {},
   );
-  const [requiredRole, setRequiredRole] = useState("");
+  const [requiredRole, setRequiredRole] = useState(shift?.requiredRole ?? "");
 
   // Restore what was submitted. Without this the conflict re-render resets
   // every uncontrolled input to its default, so a manager could acknowledge
   // a warning about one shift and save a completely different one.
   const v = state.values;
 
-  if (!open) {
+  if (!editing && !open) {
     return (
       <Button variant="outline" onClick={() => setOpen(true)}>
         <Plus className="h-4 w-4" aria-hidden="true" />
@@ -110,8 +147,18 @@ export function ShiftForm({
         id="add-shift-heading"
         className="text-sm font-semibold text-slate-900 dark:text-slate-100"
       >
-        Add a shift
+        {editing ? "Edit shift" : "Add a shift"}
       </h2>
+
+      {editing && shift!.status === "published" && (
+        <div className="mt-3">
+          <Alert tone="warning">
+            This shift is published. Saving a change will tell{" "}
+            {shift!.staffName ?? "the person rostered on"} and ask them to
+            confirm it again.
+          </Alert>
+        </div>
+      )}
 
       {state.success && (
         <div className="mt-3">
@@ -120,10 +167,11 @@ export function ShiftForm({
       )}
 
       <form
-        key={`${v?.startsAt ?? ""}|${v?.userId ?? ""}|${v?.propertyId ?? ""}`}
+        key={`${shift?.id ?? "new"}|${v?.startsAt ?? ""}|${v?.userId ?? ""}|${v?.propertyId ?? ""}`}
         action={formAction}
         className="mt-4 space-y-4"
       >
+        {editing && <input type="hidden" name="shiftId" value={shift!.id} />}
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="Property"
@@ -133,7 +181,7 @@ export function ShiftForm({
             <select
               id="shift-property"
               name="propertyId"
-              defaultValue={v?.propertyId ?? properties[0]?.id}
+              defaultValue={v?.propertyId ?? shift?.propertyId ?? properties[0]?.id}
               required
               className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
             >
@@ -153,7 +201,7 @@ export function ShiftForm({
             <select
               id="shift-user"
               name="userId"
-              defaultValue={v?.userId ?? ""}
+              defaultValue={v?.userId ?? shift?.userId ?? ""}
               onChange={(event) => {
                 const person = staff.find((s) => s.id === event.target.value);
                 setRequiredRole(person?.jobTitle ?? "");
@@ -180,7 +228,7 @@ export function ShiftForm({
               name="startsAt"
               type="datetime-local"
               required
-              defaultValue={v?.startsAt ?? `${defaultDate}T09:00`}
+              defaultValue={v?.startsAt ?? shift?.startsAt ?? `${defaultDate}T09:00`}
             />
           </Field>
 
@@ -195,7 +243,7 @@ export function ShiftForm({
               name="endsAt"
               type="datetime-local"
               required
-              defaultValue={v?.endsAt ?? `${defaultDate}T17:00`}
+              defaultValue={v?.endsAt ?? shift?.endsAt ?? `${defaultDate}T17:00`}
             />
           </Field>
 
@@ -210,7 +258,7 @@ export function ShiftForm({
               min={0}
               max={600}
               step={5}
-              defaultValue={v?.breakMinutes || 30}
+              defaultValue={v?.breakMinutes || shift?.breakMinutes || 30}
             />
           </Field>
 
@@ -236,7 +284,7 @@ export function ShiftForm({
             id="shift-notes"
             name="notes"
             rows={2}
-            defaultValue={v?.notes ?? ""}
+            defaultValue={v?.notes ?? shift?.notes ?? ""}
             maxLength={1000}
             placeholder="Conference checkout — start on the top floor."
             className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-base text-slate-900 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
@@ -273,11 +321,25 @@ export function ShiftForm({
           <Alert tone="error">{state.error}</Alert>
         )}
 
-        <div className="flex gap-2">
-          <SubmitButton needsOverride={Boolean(state.needsOverride)} />
-          <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
-            Close
-          </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <SubmitButton
+            needsOverride={Boolean(state.needsOverride)}
+            editing={editing}
+          />
+          {editing ? (
+            // A link, not a button: editing is a page state held in the URL,
+            // so leaving it means navigating out of it.
+            <Link
+              href={cancelHref ?? "/manage/roster"}
+              className="inline-flex h-9 items-center rounded-lg px-3 text-sm font-medium text-slate-900 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800"
+            >
+              Cancel
+            </Link>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+              Close
+            </Button>
+          )}
         </div>
       </form>
     </section>
