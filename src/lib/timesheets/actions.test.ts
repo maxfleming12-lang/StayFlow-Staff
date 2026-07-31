@@ -33,6 +33,7 @@ const {
   markPeriodExported,
   reopenExportedPeriod,
   approveTimesheets,
+  generateTimesheets,
 } = await import("./actions");
 const { notify } = await import("@/lib/notifications/deliver");
 const { requireRole } = await import("@/lib/auth/session");
@@ -721,6 +722,244 @@ describe("approveTimesheets", () => {
     const result = await approveTimesheets({}, formData({ ids: ["nope"] }));
 
     expect(result.error).toMatch(/select at least one/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("generateTimesheets", () => {
+  const build = (over: Record<string, string> = {}) =>
+    formData({
+      propertyId: PROPERTY,
+      fromDate: "2026-07-13",
+      toDate: "2026-07-26",
+      ...over,
+    });
+
+  /** Queue the three reads the action makes, in table order. */
+  const reads = (opts: {
+    events?: unknown[];
+    shifts?: unknown[];
+    existing?: unknown[];
+  }) => {
+    stub.on("clock_events", "select", { data: opts.events ?? [] });
+    stub.on("shifts", "select", { data: opts.shifts ?? [] });
+    stub.on("timesheets", "select", { data: opts.existing ?? [] });
+  };
+
+  const clockIn = (serverTime: string) => ({
+    id: `in-${serverTime}`,
+    user_id: STAFF,
+    event_type: "clock_in",
+    server_time: serverTime,
+    shift_id: null,
+  });
+  const clockOut = (serverTime: string) => ({
+    id: `out-${serverTime}`,
+    user_id: STAFF,
+    event_type: "clock_out",
+    server_time: serverTime,
+    shift_id: null,
+  });
+
+  it("reads a half-open window at LOCAL midnight, correct under AEDT", async () => {
+    reads({});
+
+    await generateTimesheets(
+      {},
+      build({ fromDate: "2026-01-20", toDate: "2026-01-21" }),
+    );
+
+    // January is AEDT (+11), so local midnight on the 20th is 13:00 UTC on
+    // the 19th. A hardcoded +10:00 put this an hour out for half the year,
+    // losing the first hour of clock events and sweeping in an hour of the
+    // following day.
+    const events = stub.opsFor("clock_events", "select")[0];
+    expect(hasFilter(events, "gte", "server_time", "2026-01-19T13:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(events, "lt", "server_time", "2026-01-21T13:00:00.000Z")).toBe(
+      true,
+    );
+  });
+
+  it("uses AEST correctly in winter", async () => {
+    reads({});
+    await generateTimesheets({}, build({ fromDate: "2026-07-13", toDate: "2026-07-13" }));
+
+    const events = stub.opsFor("clock_events", "select")[0];
+    expect(hasFilter(events, "gte", "server_time", "2026-07-12T14:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(events, "lt", "server_time", "2026-07-13T14:00:00.000Z")).toBe(
+      true,
+    );
+  });
+
+  it("builds a timesheet from a day's clock events", async () => {
+    reads({
+      // 9am to 5pm Sydney on 13 July.
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      user_id: STAFF,
+      work_date: "2026-07-13",
+      property_id: PROPERTY,
+      status: "submitted",
+      pay_period_start: "2026-07-13",
+      pay_period_end: "2026-07-26",
+      is_no_show: false,
+    });
+    expect(result.success).toMatch(/Built 1 timesheet/i);
+  });
+
+  it("never rebuilds a day that already has a timesheet", async () => {
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      existing: [{ user_id: STAFF, work_date: "2026-07-13" }],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    // Regenerating would silently discard a manager's correction.
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+    expect(result.success).toMatch(/Nothing new to build/i);
+  });
+
+  it("records a rostered no-show, so an absence is not invisible", async () => {
+    reads({
+      events: [],
+      shifts: [
+        {
+          id: "shift-1",
+          user_id: STAFF,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [],
+        },
+      ],
+    });
+
+    await generateTimesheets({}, build());
+
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows[0]).toMatchObject({
+      work_date: "2026-07-13",
+      is_no_show: true,
+      shift_id: "shift-1",
+    });
+  });
+
+  it("ignores an unassigned shift, which nobody can fail to turn up to", async () => {
+    reads({
+      shifts: [
+        {
+          id: "open-1",
+          user_id: null,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [],
+        },
+      ],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+    expect(result.success).toMatch(/Nothing new to build/i);
+  });
+
+  it("counts only UNPAID breaks against the rostered hours", async () => {
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      shifts: [
+        {
+          id: "shift-1",
+          user_id: STAFF,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [
+            { duration_minutes: 30, is_paid: false },
+            { duration_minutes: 15, is_paid: true },
+          ],
+        },
+      ],
+    });
+
+    await generateTimesheets({}, build());
+
+    // Rostered 8h less the 30 unpaid minutes = 7.5h; worked 8h, so half an
+    // hour over. Counting the paid break too would report an hour and a
+    // quarter of unrostered overtime that nobody worked.
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows[0].variance_hours).toBe(0.5);
+  });
+
+  it("stops rather than duplicating when the existing-sheet check fails", async () => {
+    stub.on("clock_events", "select", { data: [] });
+    stub.on("shifts", "select", { data: [] });
+    stub.on("timesheets", "select", {
+      error: { message: "statement timeout" },
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    // An unchecked failure here left `alreadyThere` empty and re-inserted
+    // every day in the range, duplicating corrected timesheets.
+    expect(result.error).toMatch(/existing timesheets.*statement timeout/i);
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+  });
+
+  it("stops rather than losing no-shows when the roster read fails", async () => {
+    stub.on("clock_events", "select", { data: [] });
+    stub.on("shifts", "select", { error: { message: "statement timeout" } });
+    stub.on("timesheets", "select", { data: [] });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(result.error).toMatch(/the roster.*statement timeout/i);
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+  });
+
+  it("stops when attendance cannot be read", async () => {
+    stub.on("clock_events", "select", { error: { message: "boom" } });
+    stub.on("shifts", "select", { data: [] });
+    stub.on("timesheets", "select", { data: [] });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(result.error).toMatch(/attendance.*boom/i);
+  });
+
+  it("rejects a backwards range", async () => {
+    const result = await generateTimesheets(
+      {},
+      build({ fromDate: "2026-07-26", toDate: "2026-07-13" }),
+    );
+
+    expect(result.error).toMatch(/cannot be before/i);
     expect(stub.operations).toHaveLength(0);
   });
 });

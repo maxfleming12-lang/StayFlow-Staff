@@ -112,7 +112,24 @@ export async function generateTimesheets(
         .lte("work_date", toDate),
     ]);
 
-    if (eventRes.error) return { error: `Could not read attendance: ${eventRes.error.message}` };
+    // All three must be checked, not just the events.
+    //
+    // A failed `existing` query leaves `alreadyThere` empty, and every day in
+    // the range is then inserted afresh — duplicating timesheets that are
+    // already there and defeating the "never overwrite a corrected sheet"
+    // guarantee this function is built around. A failed `shifts` query loses
+    // every rostered window, so a no-show gets no row at all and nothing has
+    // a variance. Both used to pass silently and produce plausible, wrong
+    // payroll.
+    for (const [label, result] of [
+      ["attendance", eventRes],
+      ["the roster", shiftRes],
+      ["existing timesheets", existingRes],
+    ] as const) {
+      if (result.error) {
+        return { error: `Could not read ${label}: ${result.error.message}` };
+      }
+    }
 
     const dayKey = (iso: string) =>
       new Intl.DateTimeFormat("en-CA", {
