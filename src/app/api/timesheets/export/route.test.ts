@@ -3,7 +3,7 @@ import { MANAGER } from "@/test/supabase-stub";
 import type { TimesheetRow } from "@/lib/timesheets/queries";
 
 vi.mock("@/lib/auth/session", () => ({
-  requireRole: vi.fn(async () => MANAGER),
+  requireUser: vi.fn(async () => MANAGER),
 }));
 vi.mock("@/lib/timesheets/queries", () => ({
   getTimesheetsForExport: vi.fn(async () => rows),
@@ -17,7 +17,7 @@ beforeEach(() => {
 
 const { GET } = await import("./route");
 const { getTimesheetsForExport } = await import("@/lib/timesheets/queries");
-const { requireRole } = await import("@/lib/auth/session");
+const { requireUser } = await import("@/lib/auth/session");
 
 const sheet = (over: Partial<TimesheetRow> = {}): TimesheetRow => ({
   id: "t1",
@@ -47,9 +47,24 @@ const call = (query: string) =>
 const PROPERTY = "33333333-3333-4333-8333-333333333333";
 
 describe("GET /api/timesheets/export", () => {
-  it("requires a manager before reading anything", async () => {
+  it("requires a signed-in user, and leaves the scope to RLS", async () => {
     await call("from=2026-07-13&to=2026-07-26");
-    expect(requireRole).toHaveBeenCalledWith("manager");
+    // Deliberately NOT a role check: `timesheets_select_self` gives a staff
+    // member their own rows and `timesheets_select_management` gives a
+    // manager their properties, so one endpoint serves both safely.
+    expect(requireUser).toHaveBeenCalled();
+  });
+
+  it("rejects a range long enough to make the server page forever", async () => {
+    const response = await call("from=2020-01-01&to=2026-07-26");
+    expect(response.status).toBe(400);
+    expect(await response.text()).toMatch(/730 days or fewer/);
+    expect(getTimesheetsForExport).not.toHaveBeenCalled();
+  });
+
+  it("accepts a range at the limit", async () => {
+    const response = await call("from=2026-07-26&to=2028-07-25");
+    expect(response.status).toBe(200);
   });
 
   it("returns the period as a CSV attachment", async () => {
