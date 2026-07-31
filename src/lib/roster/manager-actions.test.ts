@@ -37,11 +37,16 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-const { removeShift, saveShift, assignOpenShift, publishRoster } = await import(
-  "./manager-actions",
-);
+const {
+  removeShift,
+  saveShift,
+  assignOpenShift,
+  publishRoster,
+  clearRosterWeek,
+} = await import("./manager-actions");
 const { notify } = await import("@/lib/notifications/deliver");
 const { getConflictContext } = await import("./manager-queries");
+const { requireRole } = await import("@/lib/auth/session");
 
 const SHIFT = "11111111-1111-4111-8111-111111111111";
 const STAFF = "22222222-2222-4222-8222-222222222222";
@@ -550,6 +555,136 @@ describe("publishRoster", () => {
 
   it("rejects a week that is not a date", async () => {
     const result = await publishRoster({}, publish({ weekStartDate: "soon" }));
+
+    expect(result.error).toMatch(/invalid week/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("clearRosterWeek", () => {
+  const clear = (over: Record<string, string> = {}) =>
+    formData({ weekStartDate: "2026-08-03", ...over });
+
+  const cleared = (rows: { id: string; user_id: string | null; status: string }[]) =>
+    stub.on("shifts", "update", { data: rows });
+
+  it("requires an administrator, not a manager", async () => {
+    cleared([]);
+    await clearRosterWeek({}, clear());
+    expect(requireRole).toHaveBeenCalledWith("administrator");
+  });
+
+  it("archives rather than deletes, so history survives", async () => {
+    cleared([{ id: "s1", user_id: STAFF, status: "draft" }]);
+
+    const result = await clearRosterWeek({}, clear());
+
+    expect(stub.onlyOp("shifts", "update").payload).toMatchObject({
+      archived_at: expect.any(String),
+    });
+    expect(stub.opsFor("shifts", "delete")).toHaveLength(0);
+    expect(result.success).toMatch(/Cleared 1 shift\./);
+  });
+
+  it("bounds the week in the property timezone", async () => {
+    cleared([]);
+
+    await clearRosterWeek({}, clear());
+
+    const update = stub.opsFor("shifts", "update")[0];
+    expect(hasFilter(update, "gte", "starts_at", "2026-08-02T14:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(update, "lt", "starts_at", "2026-08-09T14:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(update, "is", "archived_at", null)).toBe(true);
+  });
+
+  it("leaves templates alone when archiving the roster period", async () => {
+    cleared([]);
+
+    await clearRosterWeek({}, clear());
+
+    // A template has no week and must survive clearing one.
+    const period = stub.onlyOp("roster_periods", "update");
+    expect(hasFilter(period, "eq", "is_template", false)).toBe(true);
+    expect(hasFilter(period, "eq", "week_start_date", "2026-08-03")).toBe(true);
+  });
+
+  it("narrows to one property when given one", async () => {
+    cleared([]);
+
+    await clearRosterWeek({}, clear({ propertyId: PROPERTY }));
+
+    expect(
+      hasFilter(stub.opsFor("shifts", "update")[0], "eq", "property_id", PROPERTY),
+    ).toBe(true);
+  });
+
+  it("clears both properties when none is chosen", async () => {
+    cleared([]);
+
+    await clearRosterWeek({}, clear({ propertyId: "" }));
+
+    const update = stub.opsFor("shifts", "update")[0];
+    expect(update.filters.some((f) => f.args[0] === "property_id")).toBe(false);
+  });
+
+  it("tells anyone whose PUBLISHED shifts were taken away", async () => {
+    cleared([
+      { id: "s1", user_id: STAFF, status: "published" },
+      { id: "s2", user_id: STAFF, status: "published" },
+    ]);
+
+    await clearRosterWeek({}, clear());
+
+    // They arranged their week around it. Every other action that touches a
+    // published shift says so; this used to be silent.
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(notify).mock.calls[0][0].userIds).toEqual([STAFF]);
+    expect(vi.mocked(notify).mock.calls[0][0].deepLink).toBe("/roster");
+  });
+
+  it("stays quiet when only drafts were cleared", async () => {
+    cleared([{ id: "s1", user_id: STAFF, status: "draft" }]);
+
+    await clearRosterWeek({}, clear());
+
+    // Staff cannot see drafts, so clearing them is the tidy-up it appears
+    // to be and needs no message.
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet about published shifts nobody held", async () => {
+    cleared([{ id: "s1", user_id: null, status: "published" }]);
+
+    await clearRosterWeek({}, clear());
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("keeps times and names out of the message", async () => {
+    cleared([{ id: "s1", user_id: STAFF, status: "published" }]);
+
+    await clearRosterWeek({}, clear());
+
+    const body = vi.mocked(notify).mock.calls[0][0].body;
+    expect(body).toContain("3–9 August 2026");
+    expect(body).not.toMatch(/\d\s?(am|pm)/i);
+  });
+
+  it("reports a failure rather than claiming a clear week", async () => {
+    stub.on("shifts", "update", { error: { message: "denied" } });
+
+    const result = await clearRosterWeek({}, clear());
+
+    expect(result.error).toMatch(/could not clear/i);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a week that is not a date", async () => {
+    const result = await clearRosterWeek({}, clear({ weekStartDate: "later" }));
 
     expect(result.error).toMatch(/invalid week/i);
     expect(stub.operations).toHaveLength(0);

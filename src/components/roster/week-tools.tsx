@@ -243,7 +243,8 @@ export function WeekTools({
             {shiftCount === 1 ? "" : "s"} from{" "}
             <strong>{formatWeekLabel(weekStartDate)}</strong>
             {propertyId ? " for the selected property" : " across both properties"}.
-            Staff and settings will not be changed.
+            Anyone whose shifts were published will be told their roster has
+            changed. Staff records and settings are not touched.
           </Alert>
           <div className="flex gap-2">
             <Pending label="Yes, clear this week" />
