@@ -120,4 +120,35 @@ body {
   .timesheet-print-root thead {
     display: table-header-group;
   }
+
+  /*
+   * The labour report prints as it appears on screen — it is already a
+   * table, so it needs borders and a repeating header rather than a
+   * separate print-only version.
+   */
+  .labour-report-root {
+    color: black;
+    font-size: 9pt;
+  }
+
+  .labour-report-root .overflow-x-auto {
+    overflow: visible !important;
+  }
+
+  .labour-report-root table {
+    min-width: 0 !important;
+    width: 100% !important;
+    border-collapse: collapse;
+  }
+
+  .labour-report-root th,
+  .labour-report-root td {
+    border: 0.5pt solid #999;
+    padding: 3pt 4pt;
+    break-inside: avoid;
+  }
+
+  .labour-report-root thead {
+    display: table-header-group;
+  }
 }
