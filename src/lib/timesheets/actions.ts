@@ -594,7 +594,7 @@ export async function acknowledgeTimesheet(
   _prev: TimesheetActionState,
   formData: FormData,
 ): Promise<TimesheetActionState> {
-  await requireUser();
+  const user = await requireUser();
 
   const parsed = ackSchema.safeParse({
     id: formData.get("id"),
@@ -608,9 +608,20 @@ export async function acknowledgeTimesheet(
       .from("timesheets")
       .update({
         staff_acknowledged_at: new Date().toISOString(),
-        staff_note: parsed.data.note ?? null,
+        // Only when a note was actually typed. Writing null for an empty box
+        // erased whatever the person had written before, and the confirm
+        // button sends no note field at all — so every acknowledgement
+        // cleared it.
+        ...(parsed.data.note ? { staff_note: parsed.data.note } : {}),
       })
-      .eq("id", parsed.data.id);
+      .eq("id", parsed.data.id)
+      // Scoped to the caller's OWN timesheet, not left to RLS.
+      //
+      // `timesheets_write_manager` is a `for all` policy, so a manager
+      // updating another person's row passes RLS happily. This column is
+      // evidence that the STAFF MEMBER checked their own hours; a manager
+      // able to set it is the one thing it must not allow.
+      .eq("user_id", user.id);
 
     if (error) return { error: error.message };
   } catch {
@@ -623,7 +634,14 @@ export async function acknowledgeTimesheet(
 
 const correctionSchema = z.object({
   timesheetId: z.string().uuid(),
-  requestedStart: z.string().optional(),
+  // Both times need the same shape. Only the finish was validated, so a
+  // malformed start reached `localDateTimeToIso`, which throws — and the
+  // outer catch turned that into "Cannot reach StayFlow right now", sending
+  // someone to check their signal over a typo.
+  requestedStart: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/, "Enter a start time as hh:mm.")
+    .optional(),
   requestedEnd: z
     .string()
     .regex(/^\d{2}:\d{2}$/, "Enter a finish time as hh:mm.")

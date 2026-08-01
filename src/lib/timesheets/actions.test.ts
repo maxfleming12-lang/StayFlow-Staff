@@ -34,6 +34,8 @@ const {
   reopenExportedPeriod,
   approveTimesheets,
   generateTimesheets,
+  acknowledgeTimesheet,
+  requestCorrection,
 } = await import("./actions");
 const { notify } = await import("@/lib/notifications/deliver");
 const { requireRole } = await import("@/lib/auth/session");
@@ -961,5 +963,176 @@ describe("generateTimesheets", () => {
 
     expect(result.error).toMatch(/cannot be before/i);
     expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("acknowledgeTimesheet", () => {
+  const ack = (over: Record<string, string> = {}) =>
+    formData({ id: SHEET, ...over });
+
+  it("records that the person checked their hours", async () => {
+    await acknowledgeTimesheet({}, ack());
+
+    expect(stub.onlyOp("timesheets", "update").payload).toMatchObject({
+      staff_acknowledged_at: expect.any(String),
+    });
+  });
+
+  it("can only acknowledge your OWN timesheet", async () => {
+    await acknowledgeTimesheet({}, ack());
+
+    // `timesheets_write_manager` is a `for all` policy, so RLS alone would
+    // let a manager set this on somebody else's row. The column is evidence
+    // that the staff member checked their own hours — a manager able to
+    // stamp it is the one thing it must not allow.
+    const update = stub.onlyOp("timesheets", "update");
+    expect(hasFilter(update, "eq", "id", SHEET)).toBe(true);
+    expect(hasFilter(update, "eq", "user_id", MANAGER.id)).toBe(true);
+  });
+
+  it("does NOT erase an existing note when confirming without one", async () => {
+    await acknowledgeTimesheet({}, ack());
+
+    // The confirm button sends no note field, so `note ?? null` cleared it
+    // on every single acknowledgement.
+    const payload = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("staff_note");
+  });
+
+  it("writes a note when one is given", async () => {
+    await acknowledgeTimesheet({}, ack({ note: "Finished 20 minutes late." }));
+
+    expect(stub.onlyOp("timesheets", "update").payload).toMatchObject({
+      staff_note: "Finished 20 minutes late.",
+    });
+  });
+
+  it("never touches the hours", async () => {
+    await acknowledgeTimesheet({}, ack({ note: "ok" }));
+
+    // `guard_timesheet_staff_update` permits staff exactly two columns, but
+    // the action should not be trying for more either.
+    const payload = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    for (const field of ["paid_hours", "actual_start", "actual_end", "status"]) {
+      expect(payload).not.toHaveProperty(field);
+    }
+  });
+
+  it("rejects an id that is not a uuid", async () => {
+    const result = await acknowledgeTimesheet({}, ack({ id: "nope" }));
+    expect(result.error).toMatch(/could not be identified/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("requestCorrection", () => {
+  const correct = (over: Record<string, string> = {}) =>
+    formData({
+      timesheetId: SHEET,
+      explanation: "I finished at five, not three.",
+      ...over,
+    });
+
+  const sheetOn = (workDate = "2026-07-28") =>
+    stub.on("timesheets", "select", {
+      data: { id: SHEET, work_date: workDate, status: "submitted" },
+    });
+
+  it("anchors requested times to the timesheet's own date, in property time", async () => {
+    sheetOn("2026-07-28");
+
+    await requestCorrection(
+      {},
+      correct({ requestedStart: "09:00", requestedEnd: "17:00" }),
+    );
+
+    // These columns are timestamptz. Handing Postgres a bare "09:00" stamped
+    // it onto TODAY in the session timezone, so a correction for last
+    // Tuesday was stored against this morning.
+    expect(stub.onlyOp("timesheet_adjustment_requests", "insert").payload)
+      .toMatchObject({
+        requested_date: "2026-07-28",
+        requested_start: "2026-07-27T23:00:00.000Z",
+        requested_end: "2026-07-28T07:00:00.000Z",
+      });
+  });
+
+  it("reads a finish before the start as an overnight shift", async () => {
+    sheetOn("2026-07-28");
+
+    await requestCorrection(
+      {},
+      correct({ requestedStart: "22:00", requestedEnd: "06:00" }),
+    );
+
+    expect(stub.onlyOp("timesheet_adjustment_requests", "insert").payload)
+      .toMatchObject({
+        requested_start: "2026-07-28T12:00:00.000Z",
+        requested_end: "2026-07-28T20:00:00.000Z",
+      });
+  });
+
+  it("arrives open, for a manager to act on", async () => {
+    sheetOn();
+
+    await requestCorrection({}, correct());
+
+    expect(stub.onlyOp("timesheet_adjustment_requests", "insert").payload)
+      .toMatchObject({ status: "open", user_id: MANAGER.id });
+  });
+
+  it("leaves the recorded hours exactly as they are", async () => {
+    sheetOn();
+
+    await requestCorrection(
+      {},
+      correct({ requestedStart: "09:00", requestedEnd: "17:00" }),
+    );
+
+    // A correction is a REQUEST. Attendance is append-only and staff cannot
+    // change their own hours.
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("rejects a malformed start time with a readable message", async () => {
+    const result = await requestCorrection(
+      {},
+      correct({ requestedStart: "9am", requestedEnd: "17:00" }),
+    );
+
+    // Unvalidated, this reached localDateTimeToIso, which throws — and the
+    // outer catch reported "Cannot reach StayFlow right now", sending
+    // somebody to check their signal over a typo.
+    expect(result.error).toMatch(/start time as hh:mm/i);
+    expect(stub.opsFor("timesheet_adjustment_requests", "insert")).toHaveLength(0);
+  });
+
+  it("rejects a malformed finish time too", async () => {
+    const result = await requestCorrection(
+      {},
+      correct({ requestedStart: "09:00", requestedEnd: "5pm" }),
+    );
+    expect(result.error).toMatch(/finish time as hh:mm/i);
+  });
+
+  it("insists on an explanation a manager can act on", async () => {
+    const result = await requestCorrection({}, correct({ explanation: "wrong" }));
+    expect(result.error).toMatch(/explain what was wrong/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+
+  it("reports a timesheet that has gone", async () => {
+    stub.on("timesheets", "select", { data: null });
+
+    const result = await requestCorrection({}, correct());
+
+    expect(result.error).toMatch(/no longer available/i);
+    expect(stub.opsFor("timesheet_adjustment_requests", "insert")).toHaveLength(0);
   });
 });
