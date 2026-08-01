@@ -178,10 +178,15 @@ export async function kioskPunch(
     return { error: "This device is no longer authorised. Ask your manager." };
   }
 
+  // `formData.get` returns NULL for a field the form did not send, and
+  // `.optional()` permits undefined, not null. The kiosk keypad sends only
+  // the PIN — no userId, no eventType — so both arrived as null, zod
+  // rejected them, and every punch came back "Enter your PIN." The PIN-first
+  // kiosk could not clock anybody on or off at all.
   const parsed = punchSchema.safeParse({
-    userId: formData.get("userId"),
+    userId: (formData.get("userId") as string) || undefined,
     pin: formData.get("pin"),
-    eventType: formData.get("eventType"),
+    eventType: (formData.get("eventType") as string) || undefined,
   });
 
   if (!parsed.success) {
@@ -222,14 +227,34 @@ export async function kioskPunch(
       return { error: "You are not set up to clock on at this property." };
     }
 
-    if (parsed.data.userId) {
-      const { data: status, error: verifyError } = await admin.rpc(
-        "verify_kiosk_pin",
-        { p_user: userId, p_pin: pin },
-      );
-      if (verifyError || status !== "ok") {
-        return { error: "That code is not right." };
-      }
+    // ALWAYS verify, on both paths.
+    //
+    // `resolve_kiosk_user` only matches the hash. The attempt counter and
+    // the lockout window live in `verify_kiosk_pin`, so skipping it when the
+    // PIN alone identified someone meant a locked-out account clocked on
+    // perfectly normally — the lockout applied only to the path that already
+    // knew who you were, which is the easier one.
+    //
+    // On a successful resolve this second call also resets the failure
+    // count, which is what it does for the pick-your-name path too.
+    const { data: status, error: verifyError } = await admin.rpc(
+      "verify_kiosk_pin",
+      { p_user: userId, p_pin: pin },
+    );
+
+    if (verifyError) {
+      return { error: "Could not check that code. Try again." };
+    }
+    if (status === "locked") {
+      // Say so plainly. "That code is not right" sends someone to find a
+      // manager for a new PIN when the real answer is to wait.
+      return {
+        error:
+          "Too many wrong codes. This account is locked for a short while — ask your manager if you need on now.",
+      };
+    }
+    if (status !== "ok") {
+      return { error: "That code is not right." };
     }
 
     // Same derived-state rule as the app clock, so a kiosk cannot record a
@@ -259,6 +284,18 @@ export async function kioskPunch(
     }
 
     const clientTime = new Date().toISOString();
+
+    // Keyed to the MINUTE, and deliberately not to the device.
+    //
+    // The old key embedded a fresh millisecond timestamp, so it could never
+    // collide and gave no protection at all: two taps on a shared tablet
+    // recorded two clock-ins, because the state check above is a read
+    // followed by a write with nothing holding the gap. The same person
+    // doing the same action twice inside a minute is a double tap every
+    // time, never two real events. Leaving the device out means it also
+    // covers someone tapping the office tablet and then the one at
+    // reception.
+    const minute = clientTime.slice(0, 16);
     const { error: insertError } = await admin.from("clock_events").insert({
       organisation_id: session.organisationId,
       property_id: session.propertyId,
@@ -268,10 +305,16 @@ export async function kioskPunch(
       client_time: clientTime,
       source: "kiosk" as const,
       device_id: session.id,
-      idempotency_key: `kiosk:${session.id}:${userId}:${eventType}:${clientTime}`,
+      idempotency_key: `kiosk:${userId}:${eventType}:${minute}`,
     });
 
     if (insertError) {
+      // The unique index on (user_id, idempotency_key) caught a repeat. That
+      // is the mechanism working, not a failure — tell them it is done.
+      if (insertError.code === "23505") {
+        revalidatePath("/kiosk");
+        return { success: "Already recorded a moment ago." };
+      }
       return { error: `Could not record that: ${insertError.message}` };
     }
 

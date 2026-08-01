@@ -82,4 +82,42 @@ body {
   .roster-print-root td {
     break-inside: avoid;
   }
+
+  /*
+   * Timesheets print as a table, not as the review cards.
+   *
+   * The cards carry tickboxes, edit forms and approve buttons, which are
+   * noise on paper and waste most of the page. The table below is hidden on
+   * screen and shown only here.
+   */
+  .timesheet-screen-only {
+    display: none !important;
+  }
+
+  .timesheet-print-only {
+    display: block !important;
+  }
+
+  .timesheet-print-root {
+    color: black;
+    font-size: 9pt;
+  }
+
+  .timesheet-print-root table {
+    width: 100% !important;
+    border-collapse: collapse;
+  }
+
+  .timesheet-print-root th,
+  .timesheet-print-root td {
+    border: 0.5pt solid #999;
+    padding: 3pt 4pt;
+    break-inside: avoid;
+    text-align: left;
+  }
+
+  /* Repeat the header on every page of a long pay period. */
+  .timesheet-print-root thead {
+    display: table-header-group;
+  }
 }

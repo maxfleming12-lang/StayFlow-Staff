@@ -434,6 +434,27 @@ export async function decideReplacement(
       };
     }
 
+    // Move the shift BEFORE recording the decision.
+    //
+    // There is no transaction across these two writes, so one of them will
+    // be first and the other may fail. Marking the request approved first
+    // left exactly the state this module exists to prevent: the request says
+    // covered, the shift is still the original person's, and — because a
+    // decided request drops out of the manager's queue — nobody is left
+    // looking at it to notice or retry.
+    //
+    // This way round, a failed reassignment leaves the request `claimed` and
+    // still in the queue. The manager sees the error and can try again, and
+    // in the meantime the roster is simply unchanged, which is true.
+    if (decision === "approved" && request.replacement_user_id) {
+      const result = await assignShift(
+        request.shift_id,
+        request.replacement_user_id,
+        user.id,
+      );
+      if (result.error) return result;
+    }
+
     const { error: updateError } = await supabase
       .from("shift_replacement_requests")
       .update({
@@ -446,15 +467,6 @@ export async function decideReplacement(
 
     // The transition guard raises rather than matching zero rows.
     if (updateError) return { error: updateError.message };
-
-    if (decision === "approved" && request.replacement_user_id) {
-      const result = await assignShift(
-        request.shift_id,
-        request.replacement_user_id,
-        user.id,
-      );
-      if (result.error) return result;
-    }
 
     await notify({
       organisationId: request.organisation_id,

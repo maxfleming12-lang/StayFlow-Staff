@@ -16,7 +16,12 @@
 
 export interface StubResult {
   data?: unknown;
-  error?: { message: string } | null;
+  /**
+   * A PostgREST error. `code` is the Postgres SQLSTATE and is part of the
+   * contract, not decoration: `recordPunch` treats 23505 (unique violation)
+   * as SUCCESS, because a replayed offline punch has already been recorded.
+   */
+  error?: { message: string; code?: string; details?: string; hint?: string } | null;
   count?: number | null;
 }
 
@@ -107,6 +112,23 @@ export interface SupabaseStub {
   onlyOp(table: string, verb: string): RecordedOperation;
 }
 
+/**
+ * Structural comparison, so an array argument matches by contents.
+ *
+ * `.in("id", ids)` receives an array the action built itself, never the one
+ * a test holds, so identity comparison would always fail.
+ */
+function sameArg(actual: unknown, expected: unknown): boolean {
+  if (Object.is(actual, expected)) return true;
+  if (Array.isArray(actual) && Array.isArray(expected)) {
+    return (
+      actual.length === expected.length &&
+      actual.every((value, i) => sameArg(value, expected[i]))
+    );
+  }
+  return false;
+}
+
 /** Did a recorded operation apply this filter? */
 export function hasFilter(
   op: RecordedOperation,
@@ -116,7 +138,7 @@ export function hasFilter(
   return op.filters.some(
     (f) =>
       f.method === method &&
-      args.every((expected, i) => Object.is(f.args[i], expected)),
+      args.every((expected, i) => sameArg(f.args[i], expected)),
   );
 }
 

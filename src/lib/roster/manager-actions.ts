@@ -263,31 +263,6 @@ export async function saveShift(
   }
 }
 
-/**
- * Archive a shift.
- *
- * Soft delete: attendance and audit history reference shifts, so removing
- * the row outright would orphan them.
- */
-export async function deleteShift(shiftId: string): Promise<RosterActionState> {
-  await requireRole("manager");
-
-  try {
-    const supabase = await createClient();
-    const { error } = await supabase
-      .from("shifts")
-      .update({ archived_at: new Date().toISOString() })
-      .eq("id", shiftId);
-
-    if (error) return { error: "Could not remove the shift." };
-  } catch {
-    return { error: "Cannot reach StayFlow right now." };
-  }
-
-  revalidatePath("/manage/roster");
-  return { success: "Shift removed." };
-}
-
 const removeShiftSchema = z.object({
   shiftId: z.string().uuid(),
 });
@@ -454,12 +429,42 @@ export async function clearRosterWeek(
 
     const [{ data: shifts, error: shiftError }, { error: periodError }] =
       await Promise.all([
-        shiftQuery.select("id"),
+        shiftQuery.select("id, user_id, status"),
         periodQuery.select("id"),
       ]);
 
     if (shiftError || periodError) {
       return { error: "Could not clear the roster week." };
+    }
+
+    // Anyone who had a PUBLISHED shift has already arranged their week
+    // around it, and clearing removes it from their roster. Every other
+    // action that touches a published shift tells them — publishing,
+    // assigning, editing — and `removeShift` refuses outright. Doing this
+    // silently meant a staff member's roster simply vanished.
+    //
+    // Draft shifts are invisible to staff, so clearing a draft week is
+    // exactly the tidy-up it appears to be and needs no message.
+    const affected = [
+      ...new Set(
+        (shifts ?? [])
+          .filter((s) => s.user_id && s.status === "published")
+          .map((s) => String(s.user_id)),
+      ),
+    ];
+
+    if (affected.length > 0) {
+      const { formatWeekLabel } = await import("./week");
+      await notify({
+        organisationId: user.organisationId,
+        propertyId: parsed.data.propertyId || undefined,
+        userIds: affected,
+        category: "roster_published",
+        title: "Your roster changed",
+        // No times or names: this can appear on a locked phone.
+        body: `Your shifts for ${formatWeekLabel(parsed.data.weekStartDate)} have been removed. Check StayFlow for the new roster.`,
+        deepLink: "/roster",
+      });
     }
 
     revalidatePath("/manage/roster");

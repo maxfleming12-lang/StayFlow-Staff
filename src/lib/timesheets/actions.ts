@@ -112,7 +112,24 @@ export async function generateTimesheets(
         .lte("work_date", toDate),
     ]);
 
-    if (eventRes.error) return { error: `Could not read attendance: ${eventRes.error.message}` };
+    // All three must be checked, not just the events.
+    //
+    // A failed `existing` query leaves `alreadyThere` empty, and every day in
+    // the range is then inserted afresh — duplicating timesheets that are
+    // already there and defeating the "never overwrite a corrected sheet"
+    // guarantee this function is built around. A failed `shifts` query loses
+    // every rostered window, so a no-show gets no row at all and nothing has
+    // a variance. Both used to pass silently and produce plausible, wrong
+    // payroll.
+    for (const [label, result] of [
+      ["attendance", eventRes],
+      ["the roster", shiftRes],
+      ["existing timesheets", existingRes],
+    ] as const) {
+      if (result.error) {
+        return { error: `Could not read ${label}: ${result.error.message}` };
+      }
+    }
 
     const dayKey = (iso: string) =>
       new Intl.DateTimeFormat("en-CA", {
@@ -736,7 +753,14 @@ export async function approveTimesheets(
         status: "approved",
         approved_by: user.id,
         approved_at: new Date().toISOString(),
-        manager_note: parsed.data.managerNote ?? null,
+        // Only written when a note was actually typed. Sending `null` for an
+        // empty box ERASED whatever note was already there, across every
+        // timesheet in a bulk approval — including the reply a manager wrote
+        // when declining a correction request, which is the only way the
+        // staff member ever sees that answer.
+        ...(parsed.data.managerNote
+          ? { manager_note: parsed.data.managerNote }
+          : {}),
       })
       .in("id", parsed.data.ids)
       .select("id, user_id, organisation_id");
@@ -952,6 +976,222 @@ export async function resolveAdjustmentRequest(
         decision === "approved"
           ? "Correction applied. The timesheet needs approving again."
           : "Request declined.",
+    };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Sending a period to payroll, and taking it back                     */
+/* ------------------------------------------------------------------ */
+
+const periodSchema = z.object({
+  fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose a start date."),
+  toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose an end date."),
+  propertyId: z.union([z.string().uuid(), z.literal("")]).optional(),
+  confirm: z.boolean().optional(),
+});
+
+/** Narrow a timesheet query to a period, and optionally one property. */
+function withinPeriod<T extends { eq: (c: string, v: string) => T; gte: (c: string, v: string) => T; lte: (c: string, v: string) => T }>(
+  query: T,
+  fromDate: string,
+  toDate: string,
+  propertyId?: string,
+): T {
+  const scoped = query.gte("work_date", fromDate).lte("work_date", toDate);
+  return propertyId ? scoped.eq("property_id", propertyId) : scoped;
+}
+
+/**
+ * Mark an approved period as sent to payroll.
+ *
+ * This is what finally writes `exported_at` and makes the "Sent to payroll"
+ * status reachable. It is also the point of no return for corrections:
+ * `updateTimesheetHours` and `resolveAdjustmentRequest` both refuse an
+ * exported timesheet, so this is confirmed before it runs and can be undone
+ * by `reopenExportedPeriod`.
+ *
+ * ONLY approved timesheets are marked. Anything still awaiting a decision is
+ * left alone and REPORTED — silently sweeping up unapproved hours would send
+ * figures nobody agreed to, and silently leaving them behind without saying
+ * so is an underpayment that surfaces on payday.
+ */
+export async function markPeriodExported(
+  _prev: TimesheetActionState,
+  formData: FormData,
+): Promise<TimesheetActionState> {
+  // The role check is the point; RLS scopes which rows are affected.
+  await requireRole("manager");
+
+  const parsed = periodSchema.safeParse({
+    fromDate: formData.get("fromDate"),
+    toDate: formData.get("toDate"),
+    propertyId: (formData.get("propertyId") as string) || "",
+    confirm: formData.get("confirm") === "on",
+  });
+
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+  const { fromDate, toDate, propertyId, confirm } = parsed.data;
+  if (toDate < fromDate) {
+    return { error: "The end date cannot be before the start date." };
+  }
+
+  const values = { workDate: fromDate };
+
+  try {
+    const supabase = await createClient();
+
+    // What is ready, and what would be left behind.
+    const [readyRes, pendingRes] = await Promise.all([
+      withinPeriod(
+        supabase
+          .from("timesheets")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "approved")
+          .is("exported_at", null),
+        fromDate,
+        toDate,
+        propertyId || undefined,
+      ),
+      withinPeriod(
+        supabase
+          .from("timesheets")
+          .select("id", { count: "exact", head: true })
+          .in("status", [
+            "draft",
+            "submitted",
+            "manager_review",
+            "staff_review_requested",
+          ]),
+        fromDate,
+        toDate,
+        propertyId || undefined,
+      ),
+    ]);
+
+    if (readyRes.error || pendingRes.error) {
+      return { error: "Could not check that period." };
+    }
+
+    const ready = readyRes.count ?? 0;
+    const pending = pendingRes.count ?? 0;
+
+    if (ready === 0) {
+      return {
+        error:
+          pending > 0
+            ? `Nothing in that period is approved yet — ${pending} timesheet${pending === 1 ? " is" : "s are"} still waiting for a decision.`
+            : "There are no approved timesheets in that period.",
+      };
+    }
+
+    if (!confirm) {
+      return {
+        needsConfirmation: true,
+        values,
+        error:
+          `This will mark ${ready} approved timesheet${ready === 1 ? "" : "s"} as sent to payroll. ` +
+          `Their hours can no longer be corrected unless an administrator reopens them.` +
+          (pending > 0
+            ? ` ${pending} timesheet${pending === 1 ? "" : "s"} in this period ${pending === 1 ? "is" : "are"} still awaiting a decision and will NOT be included.`
+            : ""),
+      };
+    }
+
+    const now = new Date().toISOString();
+    const { data, error } = await withinPeriod(
+      supabase
+        .from("timesheets")
+        .update({ status: "exported" as const, exported_at: now })
+        // Repeated in the write so a timesheet approved-and-edited between
+        // the count and here cannot be swept in.
+        .eq("status", "approved")
+        .is("exported_at", null),
+      fromDate,
+      toDate,
+      propertyId || undefined,
+    ).select("id");
+
+    if (error) return { error: `Could not mark the period: ${error.message}` };
+
+    const marked = data?.length ?? 0;
+    revalidatePath("/manage/timesheets");
+    revalidatePath("/timesheets");
+
+    return {
+      success:
+        `Marked ${marked} timesheet${marked === 1 ? "" : "s"} as sent to payroll.` +
+        (pending > 0
+          ? ` ${pending} still awaiting a decision ${pending === 1 ? "was" : "were"} left out.`
+          : ""),
+    };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
+}
+
+/**
+ * Take a period back from payroll so it can be corrected.
+ *
+ * Administrator only, and the exact inverse of `markPeriodExported`: it
+ * clears `exported_at` and returns the status to `approved`, leaving the
+ * approval itself intact. Editing the hours afterwards clears that approval
+ * on its own, which is `updateTimesheetHours`'s job, not this one's.
+ *
+ * Without this, one mis-clicked export would permanently block every
+ * correction for that period — the same dead end the correction queue was
+ * built to remove.
+ */
+export async function reopenExportedPeriod(
+  _prev: TimesheetActionState,
+  formData: FormData,
+): Promise<TimesheetActionState> {
+  await requireRole("administrator");
+
+  const parsed = periodSchema.safeParse({
+    fromDate: formData.get("fromDate"),
+    toDate: formData.get("toDate"),
+    propertyId: (formData.get("propertyId") as string) || "",
+    confirm: formData.get("confirm") === "on",
+  });
+
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+  const { fromDate, toDate, propertyId } = parsed.data;
+  if (toDate < fromDate) {
+    return { error: "The end date cannot be before the start date." };
+  }
+
+  try {
+    const supabase = await createClient();
+
+    const { data, error } = await withinPeriod(
+      supabase
+        .from("timesheets")
+        .update({ status: "approved" as const, exported_at: null })
+        .eq("status", "exported")
+        // A locked timesheet is a further step and is not undone here.
+        .is("locked_at", null),
+      fromDate,
+      toDate,
+      propertyId || undefined,
+    ).select("id");
+
+    if (error) return { error: `Could not reopen that period: ${error.message}` };
+
+    const reopened = data?.length ?? 0;
+    if (reopened === 0) {
+      return {
+        error:
+          "Nothing in that period is marked as sent to payroll, or it has been locked.",
+      };
+    }
+
+    revalidatePath("/manage/timesheets");
+    revalidatePath("/timesheets");
+    return {
+      success: `Reopened ${reopened} timesheet${reopened === 1 ? "" : "s"} for correction.`,
     };
   } catch {
     return { error: "Cannot reach StayFlow right now. Try again shortly." };

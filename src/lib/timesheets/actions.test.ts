@@ -26,9 +26,17 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-const { createManualTimesheet, updateTimesheetHours, resolveAdjustmentRequest } =
-  await import("./actions");
+const {
+  createManualTimesheet,
+  updateTimesheetHours,
+  resolveAdjustmentRequest,
+  markPeriodExported,
+  reopenExportedPeriod,
+  approveTimesheets,
+  generateTimesheets,
+} = await import("./actions");
 const { notify } = await import("@/lib/notifications/deliver");
+const { requireRole } = await import("@/lib/auth/session");
 
 const SHEET = "11111111-1111-4111-8111-111111111111";
 const STAFF = "22222222-2222-4222-8222-222222222222";
@@ -460,5 +468,498 @@ describe("resolveAdjustmentRequest", () => {
 
     expect(result.error).toMatch(/both a start and a finish/i);
     expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+});
+
+describe("markPeriodExported", () => {
+  const period = (over: Record<string, string> = {}) =>
+    formData({ fromDate: "2026-07-13", toDate: "2026-07-26", ...over });
+
+  /** Queue the two head-count queries, then the update. */
+  const counts = (ready: number, pending: number) => {
+    stub.on("timesheets", "select", { count: ready, data: [] });
+    stub.on("timesheets", "select", { count: pending, data: [] });
+  };
+
+  it("confirms before it runs, saying what it will do", async () => {
+    counts(12, 0);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.error).toMatch(/12 approved timesheets/i);
+    // Nothing written until confirmed.
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("warns that unapproved timesheets will be left out", async () => {
+    counts(10, 3);
+
+    const result = await markPeriodExported({}, period());
+
+    // Silently leaving hours behind is an underpayment found on payday.
+    expect(result.error).toMatch(/3 timesheets.*still awaiting a decision/i);
+    expect(result.error).toMatch(/will NOT be included/i);
+  });
+
+  it("marks only approved, unexported rows once confirmed", async () => {
+    counts(2, 0);
+    stub.on("timesheets", "update", { data: [{ id: "a" }, { id: "b" }] });
+
+    const result = await markPeriodExported({}, period({ confirm: "on" }));
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(update.payload).toMatchObject({
+      status: "exported",
+      exported_at: expect.any(String),
+    });
+    // Repeated in the write, so a row edited between count and write is safe.
+    expect(hasFilter(update, "eq", "status", "approved")).toBe(true);
+    expect(hasFilter(update, "is", "exported_at", null)).toBe(true);
+    expect(result.success).toMatch(/Marked 2 timesheets/i);
+  });
+
+  it("scopes the write to the period and property", async () => {
+    counts(1, 0);
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await markPeriodExported(
+      {},
+      period({ confirm: "on", propertyId: PROPERTY }),
+    );
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(hasFilter(update, "gte", "work_date", "2026-07-13")).toBe(true);
+    expect(hasFilter(update, "lte", "work_date", "2026-07-26")).toBe(true);
+    expect(hasFilter(update, "eq", "property_id", PROPERTY)).toBe(true);
+  });
+
+  it("says so when nothing is approved yet", async () => {
+    counts(0, 5);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.error).toMatch(/Nothing in that period is approved yet/i);
+    expect(result.needsConfirmation).toBeUndefined();
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("says so when the period is empty", async () => {
+    counts(0, 0);
+
+    const result = await markPeriodExported({}, period());
+
+    expect(result.error).toMatch(/no approved timesheets/i);
+  });
+
+  it("reports how many were left behind after marking", async () => {
+    counts(4, 2);
+    stub.on("timesheets", "update", {
+      data: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }],
+    });
+
+    const result = await markPeriodExported({}, period({ confirm: "on" }));
+
+    expect(result.success).toMatch(/Marked 4 timesheets/i);
+    expect(result.success).toMatch(/2 still awaiting a decision were left out/i);
+  });
+
+  it("rejects a backwards range", async () => {
+    const result = await markPeriodExported(
+      {},
+      period({ fromDate: "2026-07-26", toDate: "2026-07-13" }),
+    );
+
+    expect(result.error).toMatch(/cannot be before/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("reopenExportedPeriod", () => {
+  const period = (over: Record<string, string> = {}) =>
+    formData({ fromDate: "2026-07-13", toDate: "2026-07-26", ...over });
+
+  it("is the exact inverse of marking as exported", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    const result = await reopenExportedPeriod({}, period());
+
+    const update = stub.onlyOp("timesheets", "update");
+    // Back to approved with the export cleared; the approval itself stands.
+    expect(update.payload).toEqual({ status: "approved", exported_at: null });
+    expect(hasFilter(update, "eq", "status", "exported")).toBe(true);
+    expect(result.success).toMatch(/Reopened 1 timesheet/i);
+  });
+
+  it("leaves locked timesheets alone", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await reopenExportedPeriod({}, period());
+
+    // Locking is a further step and is not undone here.
+    expect(hasFilter(stub.onlyOp("timesheets", "update"), "is", "locked_at", null)).toBe(
+      true,
+    );
+  });
+
+  it("requires an administrator, not just a manager", async () => {
+    stub.on("timesheets", "update", { data: [{ id: "a" }] });
+
+    await reopenExportedPeriod({}, period());
+
+    expect(requireRole).toHaveBeenCalledWith("administrator");
+  });
+
+  it("says so when there is nothing to reopen", async () => {
+    stub.on("timesheets", "update", { data: [] });
+
+    const result = await reopenExportedPeriod({}, period());
+
+    expect(result.error).toMatch(/nothing in that period is marked as sent/i);
+  });
+});
+
+describe("approveTimesheets", () => {
+  const ids = [SHEET, "55555555-5555-4555-8555-555555555555"];
+
+  it("approves the selected timesheets and stamps the approver", async () => {
+    stub.on("timesheets", "update", {
+      data: [
+        { id: ids[0], user_id: STAFF, organisation_id: "org-1" },
+        { id: ids[1], user_id: STAFF, organisation_id: "org-1" },
+      ],
+    });
+
+    const result = await approveTimesheets({}, formData({ ids }));
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(update.payload).toMatchObject({
+      status: "approved",
+      approved_by: MANAGER.id,
+      approved_at: expect.any(String),
+    });
+    expect(hasFilter(update, "in", "id", ids)).toBe(true);
+    expect(result.success).toMatch(/Approved 2 timesheets/i);
+  });
+
+  it("does NOT erase an existing manager note when no note is typed", async () => {
+    stub.on("timesheets", "update", {
+      data: [{ id: ids[0], user_id: STAFF, organisation_id: "org-1" }],
+    });
+
+    await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    // Sending manager_note: null on a bulk approval wiped the reply a
+    // manager had written when declining a correction request — which is
+    // the only way the staff member ever sees that answer.
+    const payload = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("manager_note");
+  });
+
+  it("writes the note when one is given", async () => {
+    stub.on("timesheets", "update", {
+      data: [{ id: ids[0], user_id: STAFF, organisation_id: "org-1" }],
+    });
+
+    await approveTimesheets(
+      {},
+      formData({ ids: [ids[0]], managerNote: "Checked against the roster." }),
+    );
+
+    expect(stub.onlyOp("timesheets", "update").payload).toMatchObject({
+      manager_note: "Checked against the roster.",
+    });
+  });
+
+  it("tells each affected person once, not once per timesheet", async () => {
+    stub.on("timesheets", "update", {
+      data: [
+        { id: ids[0], user_id: STAFF, organisation_id: "org-1" },
+        { id: ids[1], user_id: STAFF, organisation_id: "org-1" },
+      ],
+    });
+
+    await approveTimesheets({}, formData({ ids }));
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    // notify() de-duplicates the recipient list itself.
+    expect(vi.mocked(notify).mock.calls[0][0].userIds).toEqual([STAFF, STAFF]);
+  });
+
+  it("refuses an empty selection without touching the database", async () => {
+    const result = await approveTimesheets({}, formData({ ids: [] }));
+
+    expect(result.error).toMatch(/select at least one/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+
+  it("surfaces a database guard, such as approving your own", async () => {
+    stub.on("timesheets", "update", {
+      error: { message: "You may not approve your own timesheet." },
+    });
+
+    const result = await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    // The guards raise rather than matching zero rows, so the real reason
+    // is worth showing rather than a generic failure.
+    expect(result.error).toBe("You may not approve your own timesheet.");
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("reports when nothing matched", async () => {
+    stub.on("timesheets", "update", { data: [] });
+
+    const result = await approveTimesheets({}, formData({ ids: [ids[0]] }));
+
+    expect(result.error).toMatch(/none of those timesheets/i);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("ignores a non-uuid id rather than sending it to the database", async () => {
+    const result = await approveTimesheets({}, formData({ ids: ["nope"] }));
+
+    expect(result.error).toMatch(/select at least one/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+});
+
+describe("generateTimesheets", () => {
+  const build = (over: Record<string, string> = {}) =>
+    formData({
+      propertyId: PROPERTY,
+      fromDate: "2026-07-13",
+      toDate: "2026-07-26",
+      ...over,
+    });
+
+  /** Queue the three reads the action makes, in table order. */
+  const reads = (opts: {
+    events?: unknown[];
+    shifts?: unknown[];
+    existing?: unknown[];
+  }) => {
+    stub.on("clock_events", "select", { data: opts.events ?? [] });
+    stub.on("shifts", "select", { data: opts.shifts ?? [] });
+    stub.on("timesheets", "select", { data: opts.existing ?? [] });
+  };
+
+  const clockIn = (serverTime: string) => ({
+    id: `in-${serverTime}`,
+    user_id: STAFF,
+    event_type: "clock_in",
+    server_time: serverTime,
+    shift_id: null,
+  });
+  const clockOut = (serverTime: string) => ({
+    id: `out-${serverTime}`,
+    user_id: STAFF,
+    event_type: "clock_out",
+    server_time: serverTime,
+    shift_id: null,
+  });
+
+  it("reads a half-open window at LOCAL midnight, correct under AEDT", async () => {
+    reads({});
+
+    await generateTimesheets(
+      {},
+      build({ fromDate: "2026-01-20", toDate: "2026-01-21" }),
+    );
+
+    // January is AEDT (+11), so local midnight on the 20th is 13:00 UTC on
+    // the 19th. A hardcoded +10:00 put this an hour out for half the year,
+    // losing the first hour of clock events and sweeping in an hour of the
+    // following day.
+    const events = stub.opsFor("clock_events", "select")[0];
+    expect(hasFilter(events, "gte", "server_time", "2026-01-19T13:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(events, "lt", "server_time", "2026-01-21T13:00:00.000Z")).toBe(
+      true,
+    );
+  });
+
+  it("uses AEST correctly in winter", async () => {
+    reads({});
+    await generateTimesheets({}, build({ fromDate: "2026-07-13", toDate: "2026-07-13" }));
+
+    const events = stub.opsFor("clock_events", "select")[0];
+    expect(hasFilter(events, "gte", "server_time", "2026-07-12T14:00:00.000Z")).toBe(
+      true,
+    );
+    expect(hasFilter(events, "lt", "server_time", "2026-07-13T14:00:00.000Z")).toBe(
+      true,
+    );
+  });
+
+  it("builds a timesheet from a day's clock events", async () => {
+    reads({
+      // 9am to 5pm Sydney on 13 July.
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      user_id: STAFF,
+      work_date: "2026-07-13",
+      property_id: PROPERTY,
+      status: "submitted",
+      pay_period_start: "2026-07-13",
+      pay_period_end: "2026-07-26",
+      is_no_show: false,
+    });
+    expect(result.success).toMatch(/Built 1 timesheet/i);
+  });
+
+  it("never rebuilds a day that already has a timesheet", async () => {
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      existing: [{ user_id: STAFF, work_date: "2026-07-13" }],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    // Regenerating would silently discard a manager's correction.
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+    expect(result.success).toMatch(/Nothing new to build/i);
+  });
+
+  it("records a rostered no-show, so an absence is not invisible", async () => {
+    reads({
+      events: [],
+      shifts: [
+        {
+          id: "shift-1",
+          user_id: STAFF,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [],
+        },
+      ],
+    });
+
+    await generateTimesheets({}, build());
+
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows[0]).toMatchObject({
+      work_date: "2026-07-13",
+      is_no_show: true,
+      shift_id: "shift-1",
+    });
+  });
+
+  it("ignores an unassigned shift, which nobody can fail to turn up to", async () => {
+    reads({
+      shifts: [
+        {
+          id: "open-1",
+          user_id: null,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [],
+        },
+      ],
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+    expect(result.success).toMatch(/Nothing new to build/i);
+  });
+
+  it("counts only UNPAID breaks against the rostered hours", async () => {
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      shifts: [
+        {
+          id: "shift-1",
+          user_id: STAFF,
+          starts_at: "2026-07-12T23:00:00.000Z",
+          ends_at: "2026-07-13T07:00:00.000Z",
+          shift_breaks: [
+            { duration_minutes: 30, is_paid: false },
+            { duration_minutes: 15, is_paid: true },
+          ],
+        },
+      ],
+    });
+
+    await generateTimesheets({}, build());
+
+    // Rostered 8h less the 30 unpaid minutes = 7.5h; worked 8h, so half an
+    // hour over. Counting the paid break too would report an hour and a
+    // quarter of unrostered overtime that nobody worked.
+    const rows = stub.onlyOp("timesheets", "insert").payload as Record<
+      string,
+      unknown
+    >[];
+    expect(rows[0].variance_hours).toBe(0.5);
+  });
+
+  it("stops rather than duplicating when the existing-sheet check fails", async () => {
+    stub.on("clock_events", "select", { data: [] });
+    stub.on("shifts", "select", { data: [] });
+    stub.on("timesheets", "select", {
+      error: { message: "statement timeout" },
+    });
+
+    const result = await generateTimesheets({}, build());
+
+    // An unchecked failure here left `alreadyThere` empty and re-inserted
+    // every day in the range, duplicating corrected timesheets.
+    expect(result.error).toMatch(/existing timesheets.*statement timeout/i);
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+  });
+
+  it("stops rather than losing no-shows when the roster read fails", async () => {
+    stub.on("clock_events", "select", { data: [] });
+    stub.on("shifts", "select", { error: { message: "statement timeout" } });
+    stub.on("timesheets", "select", { data: [] });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(result.error).toMatch(/the roster.*statement timeout/i);
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+  });
+
+  it("stops when attendance cannot be read", async () => {
+    stub.on("clock_events", "select", { error: { message: "boom" } });
+    stub.on("shifts", "select", { data: [] });
+    stub.on("timesheets", "select", { data: [] });
+
+    const result = await generateTimesheets({}, build());
+
+    expect(result.error).toMatch(/attendance.*boom/i);
+  });
+
+  it("rejects a backwards range", async () => {
+    const result = await generateTimesheets(
+      {},
+      build({ fromDate: "2026-07-26", toDate: "2026-07-13" }),
+    );
+
+    expect(result.error).toMatch(/cannot be before/i);
+    expect(stub.operations).toHaveLength(0);
   });
 });
