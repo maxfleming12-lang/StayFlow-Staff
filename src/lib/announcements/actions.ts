@@ -170,26 +170,46 @@ export async function createAnnouncement(
   return { success: "Notice posted." };
 }
 
-/** Active staff who should be told, by property or across the organisation. */
+/**
+ * Active staff who should be told, by property or across the organisation.
+ *
+ * BOTH audiences are filtered to active, non-archived profiles in this
+ * organisation. Property used to be read straight off
+ * `user_property_access`, which deactivating somebody does not touch — it
+ * only flips `profiles.is_active` — so a former employee with the app still
+ * installed kept receiving notices for their old motel, while an all-staff
+ * notice correctly skipped them.
+ */
 async function recipientUserIds(
   supabase: Awaited<ReturnType<typeof createClient>>,
   organisationId: string,
   propertyId: string | null,
 ): Promise<string[]> {
+  let restrictTo: string[] | null = null;
+
   if (propertyId) {
-    const { data } = await supabase
+    const { data: access } = await supabase
       .from("user_property_access")
       .select("user_id")
+      .eq("organisation_id", organisationId)
       .eq("property_id", propertyId);
-    return [...new Set((data ?? []).map((row) => String(row.user_id)))];
+
+    restrictTo = [...new Set((access ?? []).map((row) => String(row.user_id)))];
+    // Nobody has access, so nobody is told. Falling through with an empty
+    // list would drop the narrowing and notify the whole organisation.
+    if (restrictTo.length === 0) return [];
   }
 
-  const { data } = await supabase
+  let query = supabase
     .from("profiles")
     .select("id")
     .eq("organisation_id", organisationId)
     .eq("is_active", true)
     .is("archived_at", null);
+
+  if (restrictTo) query = query.in("id", restrictTo);
+
+  const { data } = await query;
   return (data ?? []).map((row) => String(row.id));
 }
 
