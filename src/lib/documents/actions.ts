@@ -1,10 +1,12 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import {
+  DOCUMENT_BUCKET,
   DOCUMENT_FOLDERS,
   checkFile,
   extensionOf,
@@ -17,7 +19,23 @@ export interface DocumentActionState {
   fieldErrors?: Record<string, string>;
 }
 
-const uploadSchema = z.object({
+/**
+ * Uploading, in two steps, with the file going nowhere near this server.
+ *
+ * The obvious design — post the file to a server action — cannot work here.
+ * A Next.js server action caps its request body at 1 MB by default, and
+ * Vercel caps a serverless function's body at about 4.5 MB whatever the
+ * framework says. The library accepts files up to 25 MB, so anything bigger
+ * than a small PDF failed before the action ever ran, which is why it
+ * surfaced as a server error rather than a message in the form.
+ *
+ * So: the server mints a single-use signed upload URL for a path IT chooses,
+ * the browser sends the bytes straight to storage, and a second action
+ * records the row. The bucket stays private throughout — a signed upload URL
+ * grants one write to one path and nothing else.
+ */
+
+const metadataSchema = z.object({
   title: z.string().trim().min(1, "Give the document a title.").max(200),
   description: z.string().trim().max(1000).optional(),
   folder: z.enum(DOCUMENT_FOLDERS),
@@ -26,34 +44,31 @@ const uploadSchema = z.object({
   propertyId: z.string().uuid().optional(),
 });
 
+const prepareSchema = metadataSchema.extend({
+  filename: z.string().trim().min(1).max(300),
+  size: z.number().int().nonnegative(),
+  mimeType: z.string().trim().max(200),
+});
+
+export interface UploadTicket {
+  error?: string;
+  fieldErrors?: Record<string, string>;
+  ticket?: { path: string; token: string };
+}
+
 /**
- * Add a document to the library.
+ * Step one: check the metadata and hand back a ticket to upload with.
  *
- * The row is written FIRST, then the file, then the permission that makes it
- * visible. That order matters: the row supplies the id the storage path is
- * built from, so the file can be named by something unguessable rather than
- * by its title.
- *
- * If the upload or the permission fails, the row is removed again. A
- * document with no file is a broken link in a list of policies, and one with
- * no permission row is invisible to everybody except management — both are
- * worse than a clear failure.
+ * The PATH IS CHOSEN HERE, never by the caller. It is
+ * `{organisation}/{random}.{ext}`, so a signed URL cannot be talked into
+ * writing over another document, or into another organisation's prefix.
  */
-export async function uploadDocument(
-  _prev: DocumentActionState,
-  formData: FormData,
-): Promise<DocumentActionState> {
+export async function prepareDocumentUpload(
+  input: unknown,
+): Promise<UploadTicket> {
   const user = await requireRole("manager");
 
-  const parsed = uploadSchema.safeParse({
-    title: formData.get("title"),
-    description: (formData.get("description") as string) || undefined,
-    folder: (formData.get("folder") as string) || "Policies",
-    requiresAck: formData.get("requiresAck") === "on",
-    audience: (formData.get("audience") as string) || "all",
-    propertyId: (formData.get("propertyId") as string) || undefined,
-  });
-
+  const parsed = prepareSchema.safeParse(input);
   if (!parsed.success) {
     const fieldErrors: Record<string, string> = {};
     for (const issue of parsed.error.issues) {
@@ -63,96 +78,132 @@ export async function uploadDocument(
     return { fieldErrors, error: "Check the highlighted fields." };
   }
 
-  const input = parsed.data;
-  const file = formData.get("file");
-
-  if (!(file instanceof File)) {
-    return { fieldErrors: { file: "Choose a file." }, error: "Choose a file." };
-  }
+  const data = parsed.data;
 
   // Checked here as well as by the bucket, so somebody is told why before
-  // waiting for an upload to fail.
-  const check = checkFile({ size: file.size, type: file.type });
+  // waiting for an upload that storage would refuse.
+  const check = checkFile({ size: data.size, type: data.mimeType });
   if (!check.ok) {
     return { fieldErrors: { file: check.reason }, error: check.reason };
   }
 
-  if (input.audience === "property" && !input.propertyId) {
+  if (data.audience === "property" && !data.propertyId) {
     return {
       fieldErrors: { propertyId: "Choose which property." },
       error: "Choose which property this is for.",
     };
   }
 
+  const path = storagePathFor(
+    user.organisationId,
+    randomUUID(),
+    extensionOf(data.filename),
+  );
+
+  try {
+    const admin = createServiceRoleClient();
+    const { data: signed, error } = await admin.storage
+      .from(DOCUMENT_BUCKET)
+      .createSignedUploadUrl(path);
+
+    if (error || !signed) {
+      // The commonest cause by far is the bucket not existing yet.
+      return {
+        error: `Could not start the upload: ${error?.message ?? "no upload URL"}. If this is a new deployment, check migration 0016 has been applied.`,
+      };
+    }
+
+    return { ticket: { path: signed.path, token: signed.token } };
+  } catch {
+    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  }
+}
+
+const finaliseSchema = metadataSchema.extend({
+  path: z.string().min(1).max(400),
+  size: z.number().int().nonnegative(),
+  mimeType: z.string().trim().max(200),
+});
+
+/**
+ * Step two: record the document, now the file is actually in the bucket.
+ *
+ * The row is created only AFTER a successful upload, so it can never point
+ * at a file that is not there — a broken link in a list of policies is worse
+ * than a missing entry. The reverse trade is an orphaned object if somebody
+ * closes the tab mid-upload, which costs a little storage and nothing else.
+ */
+export async function finaliseDocumentUpload(
+  input: unknown,
+): Promise<DocumentActionState> {
+  const user = await requireRole("manager");
+
+  const parsed = finaliseSchema.safeParse(input);
+  if (!parsed.success) return { error: "That upload could not be completed." };
+  const data = parsed.data;
+
+  // The path came back through the browser, so it is not trusted. It must
+  // sit under this organisation's prefix, or a crafted call could attach a
+  // row to somebody else's file.
+  if (!data.path.startsWith(`${user.organisationId}/`)) {
+    return { error: "That upload could not be completed." };
+  }
+
+  if (data.audience === "property" && !data.propertyId) {
+    return { error: "Choose which property this is for." };
+  }
+
   let documentId: string | null = null;
 
   try {
     const supabase = await createClient();
+    const admin = createServiceRoleClient();
+
+    // Confirm the object is really there before recording it.
+    const { data: found, error: listError } = await admin.storage
+      .from(DOCUMENT_BUCKET)
+      .list(user.organisationId, {
+        search: data.path.split("/").pop() ?? "",
+        limit: 1,
+      });
+
+    if (listError || !found || found.length === 0) {
+      return { error: "The file did not finish uploading. Try again." };
+    }
 
     const { data: created, error: insertError } = await supabase
       .from("documents")
       .insert({
         organisation_id: user.organisationId,
-        property_id: input.audience === "property" ? input.propertyId! : null,
-        folder: input.folder,
-        title: input.title,
-        description: input.description ?? null,
-        // Rewritten below, once the id exists to name the file by.
-        storage_path: "pending",
-        mime_type: file.type,
-        file_size_bytes: file.size,
-        requires_ack: input.requiresAck,
+        property_id: data.audience === "property" ? data.propertyId! : null,
+        folder: data.folder,
+        title: data.title,
+        description: data.description ?? null,
+        storage_path: data.path,
+        mime_type: data.mimeType,
+        file_size_bytes: data.size,
+        requires_ack: data.requiresAck,
         created_by: user.id,
       })
       .select("id")
       .maybeSingle();
 
     if (insertError || !created) {
+      await admin.storage.from(DOCUMENT_BUCKET).remove([data.path]);
       return { error: `Could not save that document: ${insertError?.message ?? ""}` };
     }
     documentId = String(created.id);
 
-    const path = storagePathFor(
-      user.organisationId,
-      documentId,
-      extensionOf(file.name),
-    );
-
-    // The bucket is private and has no policies for authenticated users, so
-    // the upload goes through the service role. The role check above and
-    // `documents_write_manager` on the row are what authorise it.
-    const admin = createServiceRoleClient();
-    const { error: uploadError } = await admin.storage
-      .from("staff-documents")
-      .upload(path, file, { contentType: file.type, upsert: false });
-
-    if (uploadError) {
-      await supabase.from("documents").delete().eq("id", documentId);
-      return { error: `Could not upload the file: ${uploadError.message}` };
-    }
-
-    const { error: pathError } = await supabase
-      .from("documents")
-      .update({ storage_path: path })
-      .eq("id", documentId);
-
-    if (pathError) {
-      await admin.storage.from("staff-documents").remove([path]);
-      await supabase.from("documents").delete().eq("id", documentId);
-      return { error: "Could not finish saving that document." };
-    }
-
     // Without a permission row the document is visible to management only —
-    // which is the safe default for an accidental upload, but not what was
-    // asked for here.
+    // the safe default for an accidental upload, but not what was asked for.
     const { error: permissionError } = await supabase
       .from("document_permissions")
       .insert(
-        input.audience === "property"
+        data.audience === "property"
           ? {
               organisation_id: user.organisationId,
               document_id: documentId,
-              property_id: input.propertyId!,
+              property_id: data.propertyId!,
             }
           : {
               organisation_id: user.organisationId,
@@ -162,11 +213,11 @@ export async function uploadDocument(
       );
 
     if (permissionError) {
-      await admin.storage.from("staff-documents").remove([path]);
       await supabase.from("documents").delete().eq("id", documentId);
+      await admin.storage.from(DOCUMENT_BUCKET).remove([data.path]);
       return {
         error:
-          "The document was uploaded but could not be shared, so it has been removed. Try again.",
+          "The document uploaded but could not be shared, so it has been removed. Try again.",
       };
     }
   } catch {

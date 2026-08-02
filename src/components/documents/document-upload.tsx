@@ -1,34 +1,37 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useFormStatus } from "react-dom";
+import { useState } from "react";
 import { Upload } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Label } from "@/components/ui/field";
+import { createClient } from "@/lib/supabase/client";
 import {
-  uploadDocument,
-  type DocumentActionState,
+  finaliseDocumentUpload,
+  prepareDocumentUpload,
 } from "@/lib/documents/actions";
 import {
   ALLOWED_MIME_TYPES,
+  DOCUMENT_BUCKET,
   DOCUMENT_FOLDERS,
   MAX_DOCUMENT_BYTES,
+  checkFile,
 } from "@/lib/documents/folders";
-
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <Button type="submit" size="sm" disabled={pending} aria-busy={pending}>
-      {pending ? "Uploading…" : "Add document"}
-    </Button>
-  );
-}
 
 const SELECT_CLASS =
   "h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
 
-/** Add a document to the library. */
+/**
+ * Add a document to the library.
+ *
+ * The file does NOT go through a server action. The server hands back a
+ * single-use signed upload URL and the browser sends the bytes straight to
+ * storage — a server action's body is capped at 1 MB by default, and at
+ * about 4.5 MB by Vercel regardless, so anything larger than a small PDF
+ * failed before the action ran.
+ *
+ * Three steps, so a failure at any point says which one.
+ */
 export function DocumentUpload({
   properties,
 }: {
@@ -36,17 +39,99 @@ export function DocumentUpload({
 }) {
   const [open, setOpen] = useState(false);
   const [audience, setAudience] = useState("all");
-  const [state, action] = useActionState<DocumentActionState, FormData>(
-    uploadDocument,
-    {},
-  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [success, setSuccess] = useState<string | null>(null);
+
+  async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const file = data.get("file");
+
+    setError(null);
+    setFieldErrors({});
+    setSuccess(null);
+
+    if (!(file instanceof File) || file.size === 0) {
+      setFieldErrors({ file: "Choose a file." });
+      return;
+    }
+
+    // Checked here first so an obviously wrong file costs no round trip.
+    const check = checkFile({ size: file.size, type: file.type });
+    if (!check.ok) {
+      setFieldErrors({ file: check.reason });
+      return;
+    }
+
+    const metadata = {
+      title: String(data.get("title") ?? ""),
+      description: String(data.get("description") ?? "") || undefined,
+      folder: String(data.get("folder") ?? "Policies"),
+      requiresAck: data.get("requiresAck") === "on",
+      audience: String(data.get("audience") ?? "all"),
+      propertyId: String(data.get("propertyId") ?? "") || undefined,
+    };
+
+    try {
+      setBusy("Checking…");
+      const prepared = await prepareDocumentUpload({
+        ...metadata,
+        filename: file.name,
+        size: file.size,
+        mimeType: file.type,
+      });
+
+      if (prepared.error || !prepared.ticket) {
+        setFieldErrors(prepared.fieldErrors ?? {});
+        setError(prepared.error ?? "Could not start the upload.");
+        return;
+      }
+
+      setBusy("Uploading…");
+      const supabase = createClient();
+      const { error: uploadError } = await supabase.storage
+        .from(DOCUMENT_BUCKET)
+        .uploadToSignedUrl(prepared.ticket.path, prepared.ticket.token, file, {
+          contentType: file.type,
+        });
+
+      if (uploadError) {
+        setError(`The file did not upload: ${uploadError.message}`);
+        return;
+      }
+
+      setBusy("Saving…");
+      const finalised = await finaliseDocumentUpload({
+        ...metadata,
+        path: prepared.ticket.path,
+        size: file.size,
+        mimeType: file.type,
+      });
+
+      if (finalised.error) {
+        setError(finalised.error);
+        return;
+      }
+
+      setSuccess(finalised.success ?? "Document added.");
+      form.reset();
+      setOpen(false);
+    } catch {
+      setError("Cannot reach StayFlow right now. Try again shortly.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   if (!open) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-        {state.success && (
+        {success && (
           <div className="mb-3">
-            <Alert tone="success">{state.success}</Alert>
+            <Alert tone="success">{success}</Alert>
           </div>
         )}
         <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
@@ -69,14 +154,8 @@ export function DocumentUpload({
         Add a document
       </h2>
 
-      {state.success && (
-        <div className="mt-3">
-          <Alert tone="success">{state.success}</Alert>
-        </div>
-      )}
-
-      <form action={action} className="mt-4 space-y-4">
-        <Field label="Title" htmlFor="doc-title" error={state.fieldErrors?.title}>
+      <form onSubmit={onSubmit} className="mt-4 space-y-4">
+        <Field label="Title" htmlFor="doc-title" error={fieldErrors.title}>
           <Input
             id="doc-title"
             name="title"
@@ -89,7 +168,7 @@ export function DocumentUpload({
         <Field
           label="File"
           htmlFor="doc-file"
-          error={state.fieldErrors?.file}
+          error={fieldErrors.file}
           hint={`PDF, image, Word or Excel, up to ${Math.round(MAX_DOCUMENT_BYTES / 1_048_576)} MB.`}
         >
           <input
@@ -135,7 +214,7 @@ export function DocumentUpload({
             <Field
               label="Property"
               htmlFor="doc-property"
-              error={state.fieldErrors?.propertyId}
+              error={fieldErrors.propertyId}
             >
               <select
                 id="doc-property"
@@ -174,11 +253,19 @@ export function DocumentUpload({
           <span>Ask staff to confirm they have read it.</span>
         </label>
 
-        {state.error && <Alert tone="error">{state.error}</Alert>}
+        {error && <Alert tone="error">{error}</Alert>}
 
-        <div className="flex gap-2">
-          <SubmitButton />
-          <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+        <div className="flex items-center gap-2">
+          <Button type="submit" size="sm" disabled={Boolean(busy)} aria-busy={Boolean(busy)}>
+            {busy ?? "Add document"}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={Boolean(busy)}
+            onClick={() => setOpen(false)}
+          >
             Close
           </Button>
         </div>

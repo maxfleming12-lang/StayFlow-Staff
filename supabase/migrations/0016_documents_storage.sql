@@ -42,9 +42,15 @@ on conflict (id) do update
       file_size_limit = excluded.file_size_limit,
       allowed_mime_types = excluded.allowed_mime_types;
 
--- Belt and braces: if a policy is ever added to storage.objects by hand,
--- this comment is where to look first.
-comment on table storage.objects is
-  'Files. The staff-documents bucket is private and has NO authenticated
-   policies by design — access is decided by documents_select and served
-   through server-issued signed URLs. See migration 0016.';
+-- NOTE for anyone adding a policy to storage.objects later:
+--
+-- The staff-documents bucket is private and has NO policies for
+-- `authenticated` BY DESIGN. Access is decided by `documents_select` and
+-- served through server-issued signed URLs from /api/documents/[id]. Adding
+-- a storage policy here would create a second, drifting copy of the access
+-- rule — read that route before you do.
+--
+-- Deliberately a SQL comment rather than `comment on table storage.objects`:
+-- that table is owned by `supabase_storage_admin`, so commenting on it needs
+-- ownership the migration role does not have, and the statement would fail
+-- the whole migration for the sake of a note.

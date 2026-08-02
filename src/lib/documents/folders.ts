@@ -23,6 +23,9 @@ export function isDocumentFolder(value: unknown): value is DocumentFolder {
   );
 }
 
+/** The private bucket created in migration 0016. */
+export const DOCUMENT_BUCKET = "staff-documents";
+
 /** Matches the bucket's limit in migration 0016. */
 export const MAX_DOCUMENT_BYTES = 26_214_400;
 
