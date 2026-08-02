@@ -13,6 +13,20 @@ import {
   storagePathFor,
 } from "./folders";
 
+/**
+ * Keep the real reason.
+ *
+ * These actions are manager-only and every throw they can produce is a
+ * configuration or storage fault — "SUPABASE_SECRET_KEY is not set", "Bucket
+ * not found". Replacing those with "cannot reach StayFlow" tells somebody to
+ * check their signal when the answer is a missing environment variable, and
+ * leaves nobody any way to find out which.
+ */
+function describe(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  return message ? `${fallback} (${message})` : fallback;
+}
+
 export interface DocumentActionState {
   error?: string;
   success?: string;
@@ -114,8 +128,8 @@ export async function prepareDocumentUpload(
     }
 
     return { ticket: { path: signed.path, token: signed.token } };
-  } catch {
-    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  } catch (error) {
+    return { error: describe(error, "Could not start the upload.") };
   }
 }
 
@@ -220,8 +234,8 @@ export async function finaliseDocumentUpload(
           "The document uploaded but could not be shared, so it has been removed. Try again.",
       };
     }
-  } catch {
-    return { error: "Cannot reach StayFlow right now. Try again shortly." };
+  } catch (error) {
+    return { error: describe(error, "Could not save that document.") };
   }
 
   revalidatePath("/documents");

@@ -119,8 +119,16 @@ export function DocumentUpload({
       setSuccess(finalised.success ?? "Document added.");
       form.reset();
       setOpen(false);
-    } catch {
-      setError("Cannot reach StayFlow right now. Try again shortly.");
+    } catch (caught) {
+      // Say which step failed and why. A bare "cannot reach StayFlow" sends
+      // somebody to check their wifi when the cause is a configuration
+      // problem only this message would reveal.
+      const detail = caught instanceof Error ? caught.message : "";
+      setError(
+        detail
+          ? `Upload failed while ${busy ?? "starting"}: ${detail}`
+          : "Upload failed. Try again shortly.",
+      );
     } finally {
       setBusy(null);
     }
