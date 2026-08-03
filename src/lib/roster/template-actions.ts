@@ -266,6 +266,11 @@ export async function saveWeekAsTemplate(
     );
 
     if (copyError) {
+      // Take the period row back out. Left behind it is an empty template in
+      // the manager's list that fails with "no shifts in it" whenever it is
+      // applied — a choice offered that cannot work. Deleted rather than
+      // archived: this one never successfully existed.
+      await supabase.from("roster_periods").delete().eq("id", period.id);
       return { error: `Could not save the template shifts: ${copyError.message}` };
     }
 
