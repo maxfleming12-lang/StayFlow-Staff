@@ -71,6 +71,27 @@ describe("overlapping shifts", () => {
     expect(conflicts.map((c) => c.kind)).not.toContain("overlap");
   });
 
+  it("flags an overlap at the other motel, not just within one", () => {
+    // The same people work both properties, so a clash is a clash wherever
+    // it happens. Nothing in `findConflicts` filters by property and this
+    // holds it that way: adding a property filter would silently stop
+    // double-booking from being caught, which is the whole point of it.
+    const conflicts = findConflicts(
+      shift({ propertyId: COASTAL }),
+      baseContext({
+        existingShifts: [
+          shift({
+            id: "other",
+            propertyId: LODGE,
+            startsAt: "2026-08-05T14:00:00+10:00",
+            endsAt: "2026-08-05T20:00:00+10:00",
+          }),
+        ],
+      }),
+    );
+    expect(conflicts.map((c) => c.kind)).toContain("overlap");
+  });
+
   it("ignores the shift being edited itself", () => {
     const conflicts = findConflicts(
       shift(),
