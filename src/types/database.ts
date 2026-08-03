@@ -2479,12 +2479,20 @@ export type Database = {
         Returns: boolean
       }
       is_service_context: { Args: never; Returns: boolean }
+      kiosk_device_fail: {
+        Args: { p_session: string }
+        Returns: string
+      }
       manages_property: {
         Args: { target_property_id: string }
         Returns: boolean
       }
       manages_user: { Args: { target_user_id: string }; Returns: boolean }
       redact_sensitive: { Args: { payload: Json }; Returns: Json }
+      resolve_kiosk_pin: {
+        Args: { p_pin: string; p_session: string }
+        Returns: { status: string; resolved_user: string | null }[]
+      }
       resolve_kiosk_user: {
         Args: { p_pin: string; p_property: string }
         Returns: string | null

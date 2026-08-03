@@ -43,8 +43,26 @@ beforeEach(() => {
   rpc = vi.fn(async () => ({ data: "ok", error: null }));
   (stub.client as { rpc: unknown }).rpc = rpc;
   vi.clearAllMocks();
-  rpc.mockImplementation(async () => ({ data: "ok", error: null }));
+  rpc.mockImplementation(defaultRpc);
 });
+
+/**
+ * `resolve_kiosk_pin` is `returns table(...)`, so it arrives as an array of
+ * one row — not the bare uuid the superseded `resolve_kiosk_user` returned.
+ */
+const resolves = (status: string, user: string | null = null) => ({
+  data: [{ status, resolved_user: user }],
+  error: null,
+});
+
+const defaultRpc = async (name: string) =>
+  name === "resolve_kiosk_pin" ? resolves("ok", STAFF) : { data: "ok", error: null };
+
+/** Every rpc answers `value` except the resolve, which succeeds. */
+const rpcAnswering = (value: unknown) =>
+  rpc.mockImplementation(async (name: string) =>
+    name === "resolve_kiosk_pin" ? resolves("ok", STAFF) : { data: value, error: null },
+  );
 
 const { kioskPunch } = await import("./actions");
 
@@ -75,10 +93,6 @@ describe("kioskPunch identity", () => {
   });
 
   it("verifies the PIN even when the PIN alone identified the person", async () => {
-    rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: STAFF, error: null };
-      return { data: "ok", error: null };
-    });
     allowAndSee();
 
     await kioskPunch({}, punch());
@@ -86,15 +100,26 @@ describe("kioskPunch identity", () => {
     // The attempt counter and lockout live in verify_kiosk_pin. Skipping it
     // on this path made the lockout apply only to the path that already
     // knew who you were.
-    expect(rpcCalls("resolve_kiosk_user")).toHaveLength(1);
+    expect(rpcCalls("resolve_kiosk_pin")).toHaveLength(1);
     expect(rpcCalls("verify_kiosk_pin")).toHaveLength(1);
   });
 
-  it("refuses a LOCKED account on the PIN-only path, and says why", async () => {
-    rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: STAFF, error: null };
-      return { data: "locked", error: null };
+  it("asks about the device's own session, never a property from the form", async () => {
+    // The superseded `resolve_kiosk_user` took a property id as an argument.
+    // The property now comes from the session row inside the function, so a
+    // caller cannot ask about a property the tablet is not authorised for.
+    allowAndSee();
+
+    await kioskPunch({}, punch({ propertyId: "44444444-4444-4444-8444-444444444444" }));
+
+    expect(rpcCalls("resolve_kiosk_pin")[0][1]).toEqual({
+      p_session: "kiosk-1",
+      p_pin: "481920",
     });
+  });
+
+  it("refuses a LOCKED account on the PIN-only path, and says why", async () => {
+    rpcAnswering("locked");
     allowAndSee();
 
     const result = await kioskPunch({}, punch());
@@ -116,7 +141,11 @@ describe("kioskPunch identity", () => {
   });
 
   it("refuses a wrong PIN", async () => {
-    rpc.mockImplementation(async () => ({ data: "invalid", error: null }));
+    rpc.mockImplementation(async (name: string) =>
+      name === "verify_kiosk_pin"
+        ? { data: "invalid", error: null }
+        : { data: "open", error: null },
+    );
     allowAndSee();
 
     const result = await kioskPunch({}, punch({ userId: STAFF }));
@@ -126,10 +155,11 @@ describe("kioskPunch identity", () => {
   });
 
   it("refuses a code that matches nobody at this property", async () => {
-    rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: null, error: null };
-      return { data: "ok", error: null };
-    });
+    rpc.mockImplementation(async (name: string) =>
+      name === "resolve_kiosk_pin"
+        ? resolves("unknown")
+        : { data: "ok", error: null },
+    );
 
     const result = await kioskPunch({}, punch());
 
@@ -138,10 +168,6 @@ describe("kioskPunch identity", () => {
   });
 
   it("refuses somebody who does not work at this property", async () => {
-    rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: STAFF, error: null };
-      return { data: "ok", error: null };
-    });
     stub.on("user_property_access", "select", { data: null });
 
     const result = await kioskPunch({}, punch());
@@ -153,10 +179,6 @@ describe("kioskPunch identity", () => {
   });
 
   it("checks access against the DEVICE's property, not one supplied by the form", async () => {
-    rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: STAFF, error: null };
-      return { data: "ok", error: null };
-    });
     allowAndSee();
 
     await kioskPunch({}, punch({ propertyId: "44444444-4444-4444-8444-444444444444" }));
@@ -173,10 +195,94 @@ describe("kioskPunch identity", () => {
   });
 });
 
+describe("guessing at the tablet", () => {
+  /**
+   * The hole this covers: `resolve_kiosk_user` was `stable sql` and could
+   * not write, so a code matching nobody cost the caller nothing — no
+   * counter, no record. `verify_kiosk_pin` locks a USER, and a PIN-first
+   * attempt names no user, so nothing applied. A six-digit space could be
+   * swept until something matched, and the code that finally matched
+   * clocked that person on with a clean tally. See migration 0017.
+   */
+  it("stops the tablet once it has been locked", async () => {
+    rpc.mockImplementation(async (name: string) =>
+      name === "resolve_kiosk_pin" ? resolves("locked") : { data: "ok", error: null },
+    );
+
+    const result = await kioskPunch({}, punch());
+
+    expect(result.error).toMatch(/too many unrecognised codes at this tablet/i);
+    // Nothing further is asked: no hash is checked while locked.
+    expect(rpcCalls("verify_kiosk_pin")).toHaveLength(0);
+    expect(stub.opsFor("clock_events", "insert")).toHaveLength(0);
+  });
+
+  it("says nothing about how many tries are left, or how long", async () => {
+    // Either number is a dial for somebody sweeping the space, and neither
+    // helps a staff member — their answer is the same regardless.
+    rpc.mockImplementation(async (name: string) =>
+      name === "resolve_kiosk_pin" ? resolves("locked") : { data: "ok", error: null },
+    );
+
+    const result = await kioskPunch({}, punch());
+
+    expect(result.error).not.toMatch(/\d/);
+  });
+
+  it("counts a wrong PIN against the tablet, not only the person", async () => {
+    // Otherwise somebody who knows one user id has an unthrottled oracle for
+    // that user, bounded only by a per-user lockout they can wait out while
+    // the device carries on answering.
+    rpc.mockImplementation(async (name: string) =>
+      name === "verify_kiosk_pin"
+        ? { data: "wrong", error: null }
+        : { data: "open", error: null },
+    );
+    allowAndSee();
+
+    await kioskPunch({}, punch({ userId: STAFF }));
+
+    expect(rpcCalls("kiosk_device_fail")).toHaveLength(1);
+    expect(rpcCalls("kiosk_device_fail")[0][1]).toEqual({ p_session: "kiosk-1" });
+  });
+
+  it("locks the tablet when that wrong PIN was the last straw", async () => {
+    rpc.mockImplementation(async (name: string) => {
+      if (name === "verify_kiosk_pin") return { data: "wrong", error: null };
+      if (name === "kiosk_device_fail") return { data: "locked", error: null };
+      return { data: "ok", error: null };
+    });
+    allowAndSee();
+
+    const result = await kioskPunch({}, punch({ userId: STAFF }));
+
+    expect(result.error).toMatch(/too many unrecognised codes at this tablet/i);
+  });
+
+  it("does not count a tally against a tablet that got it right", async () => {
+    allowAndSee();
+
+    await kioskPunch({}, punch());
+
+    expect(rpcCalls("kiosk_device_fail")).toHaveLength(0);
+  });
+
+  it("treats a revoked device the same as an unknown one", async () => {
+    rpc.mockImplementation(async (name: string) =>
+      name === "resolve_kiosk_pin" ? resolves("no_device") : { data: "ok", error: null },
+    );
+
+    const result = await kioskPunch({}, punch());
+
+    expect(result.error).toMatch(/no longer authorised/i);
+    expect(stub.opsFor("clock_events", "insert")).toHaveLength(0);
+  });
+});
+
 describe("kioskPunch recording", () => {
   beforeEach(() => {
     rpc.mockImplementation(async (name: string) => {
-      if (name === "resolve_kiosk_user") return { data: STAFF, error: null };
+      if (name === "resolve_kiosk_pin") return resolves("ok", STAFF);
       return { data: "ok", error: null };
     });
   });

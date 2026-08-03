@@ -153,6 +153,16 @@ export async function setStaffPin(
 /* Kiosk: start a device session, and punch                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Said when the TABLET is locked, not the person.
+ *
+ * Deliberately does not say how many attempts remain or how long is left:
+ * that is a dial for somebody sweeping the PIN space, and useless to a
+ * staff member, whose answer is the same either way.
+ */
+const DEVICE_LOCKED =
+  "Too many unrecognised codes at this tablet. It is paused for a short while — ask your manager.";
+
 const punchSchema = z.object({
   userId: z.string().uuid().optional(),
   pin: z.string().regex(/^[0-9]{6}$/),
@@ -201,17 +211,32 @@ export async function kioskPunch(
     let displayName = "";
 
     if (!userId) {
+      // Throttled at the DEVICE, because a PIN-first attempt names nobody
+      // to throttle. Every miss used to be free, so the six-digit space
+      // could be swept until something matched — and the code that finally
+      // matched clocked that person on with a clean per-user tally, since
+      // nothing had been counting. See migration 0017.
       const { data: resolved, error: resolveError } = await admin.rpc(
-        "resolve_kiosk_user",
-        { p_property: session.propertyId, p_pin: pin },
+        "resolve_kiosk_pin",
+        { p_session: session.id, p_pin: pin },
       );
       if (resolveError) {
         return { error: "Could not check that code. Try again." };
       }
-      if (!resolved) {
+
+      // `returns table(...)` arrives as an array of one row.
+      const outcome = Array.isArray(resolved) ? resolved[0] : resolved;
+
+      if (outcome?.status === "locked") {
+        return { error: DEVICE_LOCKED };
+      }
+      if (outcome?.status === "no_device") {
+        return { error: "This device is no longer authorised. Ask your manager." };
+      }
+      if (outcome?.status !== "ok" || !outcome.resolved_user) {
         return { error: "That code is not recognised at this property." };
       }
-      userId = resolved;
+      userId = outcome.resolved_user as string;
     }
 
     // The person must actually work at this property. Without this, a valid
@@ -254,6 +279,16 @@ export async function kioskPunch(
       };
     }
     if (status !== "ok") {
+      // Count it against the tablet as well as the person. Without this,
+      // somebody who knows one user id has an unthrottled oracle for that
+      // user — bounded only by a per-user lockout they can simply wait out,
+      // while the device carries on answering.
+      const { data: device } = await admin.rpc("kiosk_device_fail", {
+        p_session: session.id,
+      });
+      if (device === "locked") {
+        return { error: DEVICE_LOCKED };
+      }
       return { error: "That code is not right." };
     }
 
