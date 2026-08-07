@@ -825,20 +825,151 @@ describe("generateTimesheets", () => {
     expect(result.success).toMatch(/Built 1 timesheet/i);
   });
 
-  it("never rebuilds a day that already has a timesheet", async () => {
+  /** A timesheet row as the existing-rows read returns it. */
+  const existingSheet = (over: Record<string, unknown> = {}) => ({
+    id: "ts-1",
+    user_id: STAFF,
+    work_date: "2026-07-13",
+    status: "submitted",
+    manager_note: null,
+    staff_acknowledged_at: null,
+    actual_start: null,
+    actual_end: null,
+    ...over,
+  });
+
+  it("never rebuilds a timesheet a manager has annotated", async () => {
     reads({
       events: [
         clockIn("2026-07-12T23:00:00.000Z"),
         clockOut("2026-07-13T07:00:00.000Z"),
       ],
-      existing: [{ user_id: STAFF, work_date: "2026-07-13" }],
+      existing: [existingSheet({ manager_note: "Agreed 30 min unpaid." })],
     });
 
     const result = await generateTimesheets({}, build());
 
-    // Regenerating would silently discard a manager's correction.
+    // Rebuilding would silently discard the correction.
     expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
-    expect(result.success).toMatch(/Nothing new to build/i);
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+    expect(result.success).toMatch(/nothing to do/i);
+  });
+
+  it("never rebuilds one the staff member has acknowledged", async () => {
+    reads({
+      events: [clockIn("2026-07-12T23:00:00.000Z")],
+      existing: [existingSheet({ staff_acknowledged_at: "2026-07-13T09:00:00Z" })],
+    });
+
+    await generateTimesheets({}, build());
+
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("never rebuilds one that has left review", async () => {
+    reads({
+      events: [clockIn("2026-07-12T23:00:00.000Z")],
+      existing: [existingSheet({ status: "approved" })],
+    });
+
+    await generateTimesheets({}, build());
+
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("never rebuilds a hand-entered sheet, which always carries both times", async () => {
+    reads({
+      events: [clockIn("2026-07-12T23:00:00.000Z")],
+      existing: [
+        existingSheet({
+          actual_start: "2026-07-12T23:00:00Z",
+          actual_end: "2026-07-13T07:00:00Z",
+        }),
+      ],
+    });
+
+    await generateTimesheets({}, build());
+
+    expect(stub.opsFor("timesheets", "update")).toHaveLength(0);
+  });
+
+  it("DOES rebuild an untouched sheet that has no attendance on it", async () => {
+    // The bug this fixes. A range generated before the shift happened wrote
+    // a no-show for every rostered day, and skipping every existing row meant
+    // the real clock-in could never reach it — the day was frozen as "did not
+    // turn up" before it began, and the person would be paid nothing.
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      existing: [existingSheet()],
+    });
+    stub.on("timesheets", "update", { data: { id: "ts-1" }, error: null });
+
+    const result = await generateTimesheets({}, build());
+
+    const update = stub.onlyOp("timesheets", "update");
+    const patch = update.payload as Record<string, unknown>;
+    expect(patch.actual_start).toBe("2026-07-12T23:00:00.000Z");
+    expect(patch.actual_end).toBe("2026-07-13T07:00:00.000Z");
+    expect(patch.is_no_show).toBe(false);
+    expect(hasFilter(update, "eq", "id", "ts-1")).toBe(true);
+    expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
+    expect(result.success).toMatch(/updated 1/i);
+  });
+
+  it("finishes a sheet built mid-shift, once the clock-out arrives", async () => {
+    reads({
+      events: [
+        clockIn("2026-07-12T23:00:00.000Z"),
+        clockOut("2026-07-13T07:00:00.000Z"),
+      ],
+      existing: [existingSheet({ actual_start: "2026-07-12T23:00:00Z" })],
+    });
+    stub.on("timesheets", "update", { data: { id: "ts-1" }, error: null });
+
+    await generateTimesheets({}, build());
+
+    const patch = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    expect(patch.actual_end).toBe("2026-07-13T07:00:00.000Z");
+  });
+
+  it("re-checks the row is untouched at the moment it writes", async () => {
+    // Between reading the row and updating it, a manager may have approved
+    // the very sheet being rebuilt.
+    reads({
+      events: [clockIn("2026-07-12T23:00:00.000Z")],
+      existing: [existingSheet()],
+    });
+    stub.on("timesheets", "update", { data: { id: "ts-1" }, error: null });
+
+    await generateTimesheets({}, build());
+
+    const update = stub.onlyOp("timesheets", "update");
+    expect(hasFilter(update, "eq", "status", "submitted")).toBe(true);
+    expect(hasFilter(update, "is", "manager_note", null)).toBe(true);
+    expect(hasFilter(update, "is", "staff_acknowledged_at", null)).toBe(true);
+  });
+
+  it("does not move a rebuilt sheet backwards through review", async () => {
+    reads({
+      events: [clockIn("2026-07-12T23:00:00.000Z")],
+      existing: [existingSheet()],
+    });
+    stub.on("timesheets", "update", { data: { id: "ts-1" }, error: null });
+
+    await generateTimesheets({}, build());
+
+    const patch = stub.onlyOp("timesheets", "update").payload as Record<
+      string,
+      unknown
+    >;
+    expect(patch.status).toBeUndefined();
+    expect(patch.created_by).toBeUndefined();
   });
 
   it("records a rostered no-show, so an absence is not invisible", async () => {
@@ -884,7 +1015,34 @@ describe("generateTimesheets", () => {
     const result = await generateTimesheets({}, build());
 
     expect(stub.opsFor("timesheets", "insert")).toHaveLength(0);
-    expect(result.success).toMatch(/Nothing new to build/i);
+    expect(result.success).toMatch(/nothing to do/i);
+  });
+
+  it("refuses a range that has not happened yet", async () => {
+    // A shift with no attendance is written as a no-show, and that is what
+    // froze real clock-ins out.
+    const result = await generateTimesheets(
+      {},
+      build({ fromDate: "2099-01-01", toDate: "2099-01-07" }),
+    );
+
+    expect(result.error).toMatch(/has not happened yet/i);
+    expect(stub.operations).toHaveLength(0);
+  });
+
+  it("stops a range at today rather than refusing it", async () => {
+    // Picking the current week on a Wednesday is the normal thing to do.
+    reads({});
+
+    const result = await generateTimesheets(
+      {},
+      build({ fromDate: "2026-07-13", toDate: "2099-01-07" }),
+    );
+
+    const existing = stub.onlyOp("timesheets", "select");
+    const upper = existing.filters.find((f) => f.method === "lte");
+    expect(String(upper?.args[1])).not.toBe("2099-01-07");
+    expect(result.success).toMatch(/stopped at today/i);
   });
 
   it("counts only UNPAID breaks against the rostered hours", async () => {

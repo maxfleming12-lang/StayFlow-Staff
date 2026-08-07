@@ -3,7 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { addIsoDays, localDateTimeToIso, startOfLocalDay } from "@/lib/format";
+import {
+  DEFAULT_TIMEZONE,
+  addIsoDays,
+  localDateTimeToIso,
+  startOfLocalDay,
+} from "@/lib/format";
 import { requireRole, requireUser } from "@/lib/auth/session";
 import { notify } from "@/lib/notifications/deliver";
 import type { ClockEvent, ClockEventType } from "@/lib/clock/state";
@@ -54,9 +59,20 @@ const generateSchema = z.object({
  * member's clock events for a property, which no single user may do. The
  * caller is already verified as a manager for that property.
  *
- * Existing timesheets are NOT overwritten. Once a manager has touched a
- * timesheet — let alone approved one — regenerating it from raw events
- * would silently discard their correction.
+ * A timesheet somebody has TOUCHED is never overwritten — regenerating it
+ * from raw events would silently discard a correction. An untouched one is
+ * refreshed, and the difference matters more than it sounds:
+ *
+ * Generating a range that ran past today wrote a row for every rostered
+ * shift that had not happened yet. With no attendance to draw on each was
+ * recorded as a no-show — no start, no finish, zero paid hours, variance
+ * short by the full rostered length. Skipping every existing row then meant
+ * the real clock-in, when it came, could never reach the timesheet: the day
+ * was frozen as "did not turn up" before it began, and staff would have been
+ * paid nothing for shifts they worked.
+ *
+ * So: nothing is generated past today, and a row that is still plain
+ * scaffolding is rebuilt rather than skipped.
  */
 export async function generateTimesheets(
   _prev: TimesheetActionState,
@@ -76,17 +92,43 @@ export async function generateTimesheets(
     return { error: "The end date cannot be before the start date." };
   }
 
+  // Nothing is built past today, as the property reckons it.
+  //
+  // A shift that has not happened has no attendance, so it was written as a
+  // no-show — and then frozen that way, because a row that exists is never
+  // rebuilt from scratch. Tomorrow's roster became tomorrow's "did not turn
+  // up" before anybody had the chance to turn up.
+  const today = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: DEFAULT_TIMEZONE,
+  }).format(new Date());
+
+  if (fromDate > today) {
+    return {
+      error:
+        "That range has not happened yet. Timesheets are built from attendance, so there is nothing to build.",
+    };
+  }
+
+  // Quietly shortened rather than refused: picking the current week on a
+  // Wednesday is the normal thing to do, and Monday to Wednesday is exactly
+  // what the manager wants out of it. The message says where it stopped.
+  const lastDate = toDate > today ? today : toDate;
+  const shortened = lastDate !== toDate;
+
   try {
     const admin = createServiceRoleClient();
 
     // Half-open [from, until): local midnight on `fromDate` to local midnight
-    // on the day after `toDate`. The offset must come from the timezone rather
-    // than a hardcoded "+10:00", which is an hour out during AEDT — from
-    // October to April that window started at 1am and ran an hour into the
-    // following day, so the first hour of clock events went missing and an
-    // hour of the next day was swept in.
+    // on the day after `lastDate`. The offset must come from the timezone
+    // rather than a hardcoded "+10:00", which is an hour out during AEDT —
+    // from October to April that window started at 1am and ran an hour into
+    // the following day, so the first hour of clock events went missing and
+    // an hour of the next day was swept in.
     const from = startOfLocalDay(fromDate);
-    const until = startOfLocalDay(addIsoDays(toDate, 1));
+    const until = startOfLocalDay(addIsoDays(lastDate, 1));
 
     const [eventRes, shiftRes, existingRes] = await Promise.all([
       admin
@@ -106,10 +148,12 @@ export async function generateTimesheets(
         .lt("starts_at", until),
       admin
         .from("timesheets")
-        .select("user_id, work_date")
+        .select(
+          "id, user_id, work_date, status, manager_note, staff_acknowledged_at, actual_start, actual_end",
+        )
         .eq("property_id", propertyId)
         .gte("work_date", fromDate)
-        .lte("work_date", toDate),
+        .lte("work_date", lastDate),
     ]);
 
     // All three must be checked, not just the events.
@@ -175,20 +219,67 @@ export async function generateTimesheets(
       });
     }
 
-    const alreadyThere = new Set(
-      (existingRes.data ?? []).map((t) => `${t.user_id}|${t.work_date}`),
+    /**
+     * Is this row still plain scaffolding?
+     *
+     * `submitted` with no attendance on it and nobody's fingerprints. Such a
+     * row carries no information that rebuilding could destroy, and leaving
+     * it alone is what stranded a real clock-in behind a no-show.
+     *
+     * The attendance test is what protects a MANUAL entry: those always
+     * carry both times, so they are never in scope here however they were
+     * worded. A part-finished row — clocked in, not yet out — is in scope,
+     * because the missing half is the whole point of rebuilding it.
+     *
+     * Anything approved, exported, locked, acknowledged by staff or annotated
+     * by a manager fails the first tests and is left exactly as it is.
+     */
+    const isScaffolding = (row: Record<string, unknown>) =>
+      row.status === "submitted" &&
+      row.manager_note == null &&
+      row.staff_acknowledged_at == null &&
+      (row.actual_start == null || row.actual_end == null);
+
+    const existingByKey = new Map(
+      (existingRes.data ?? []).map((t) => [
+        `${t.user_id}|${t.work_date}`,
+        t as Record<string, unknown>,
+      ]),
     );
 
     const keys = new Set([...byPersonDay.keys(), ...shiftByPersonDay.keys()]);
     const rows: TimesheetInsert[] = [];
+    const refreshes: { id: string; patch: TimesheetUpdate }[] = [];
 
     for (const key of keys) {
-      if (alreadyThere.has(key)) continue;
+      const existing = existingByKey.get(key);
+      if (existing && !isScaffolding(existing)) continue;
 
       const [userId, workDate] = key.split("|");
       const events = byPersonDay.get(key) ?? [];
       const shift = shiftByPersonDay.get(key) ?? null;
       const generated = generateTimesheet(events, shift);
+
+      if (existing) {
+        // Only what the clock and the roster decide. `status` is not touched,
+        // so a rebuild cannot walk a sheet backwards through review, and
+        // `created_by` keeps whoever first built it.
+        refreshes.push({
+          id: String(existing.id),
+          patch: {
+            shift_id: shift?.id ?? null,
+            rostered_start: shift?.startsAt ?? null,
+            rostered_end: shift?.endsAt ?? null,
+            actual_start: generated.actualStart,
+            actual_end: generated.actualEnd,
+            break_minutes: generated.breakMinutes,
+            paid_hours: generated.paidHours,
+            variance_hours: generated.varianceHours,
+            is_no_show: generated.isNoShow,
+          },
+        });
+        continue;
+      }
 
       rows.push({
         organisation_id: user.organisationId,
@@ -206,26 +297,61 @@ export async function generateTimesheets(
         is_no_show: generated.isNoShow,
         status: "submitted" as const,
         pay_period_start: fromDate,
-        pay_period_end: toDate,
+        pay_period_end: lastDate,
         created_by: user.id,
       });
     }
 
-    if (rows.length === 0) {
+    const upTo = shortened ? ` Stopped at today (${lastDate}).` : "";
+
+    if (rows.length === 0 && refreshes.length === 0) {
       return {
-        success:
-          "Nothing new to build — every day in that range already has a timesheet.",
+        success: `Nothing to do — every day in that range is already accounted for.${upTo}`,
       };
     }
 
-    const { error } = await admin.from("timesheets").insert(rows);
-    if (error) return { error: `Could not build timesheets: ${error.message}` };
+    if (rows.length > 0) {
+      const { error } = await admin.from("timesheets").insert(rows);
+      if (error) return { error: `Could not build timesheets: ${error.message}` };
+    }
+
+    // One statement each, rather than an upsert. An upsert would have to
+    // restate every column to satisfy the insert branch, and would overwrite
+    // `created_by` on rows somebody else first built.
+    const failed = (
+      await Promise.all(
+        refreshes.map(async ({ id, patch }) => {
+          const { error } = await admin
+            .from("timesheets")
+            .update(patch)
+            .eq("id", id)
+            // Re-checked at the write. Between the read above and here, a
+            // manager may have approved the very sheet being rebuilt.
+            .eq("status", "submitted")
+            .is("manager_note", null)
+            .is("staff_acknowledged_at", null);
+          return error ? id : null;
+        }),
+      )
+    ).filter(Boolean);
+
+    if (failed.length > 0) {
+      return {
+        error: `Built ${rows.length}, but ${failed.length} existing timesheet${failed.length === 1 ? "" : "s"} could not be updated. Check them by hand.`,
+      };
+    }
 
     revalidatePath("/manage/timesheets");
     revalidatePath("/timesheets");
-    return {
-      success: `Built ${rows.length} timesheet${rows.length === 1 ? "" : "s"} from recorded attendance.`,
-    };
+
+    const built = rows.length
+      ? `Built ${rows.length} timesheet${rows.length === 1 ? "" : "s"}`
+      : "";
+    const updated = refreshes.length
+      ? `${built ? " and updated" : "Updated"} ${refreshes.length} that had no attendance on ${refreshes.length === 1 ? "it" : "them"} yet`
+      : "";
+
+    return { success: `${built}${updated} from recorded attendance.${upTo}` };
   } catch {
     return { error: "Cannot reach StayFlow right now. Try again shortly." };
   }
