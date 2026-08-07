@@ -113,7 +113,12 @@ port = 54324
 # sender_name = "Admin"
 
 [storage]
-enabled = false
+# On, because migration 0016 creates the staff-documents bucket and cannot
+# run without the `storage` schema — `supabase db reset` failed at 0016 with
+# `relation "storage.buckets" does not exist` while this was false. It also
+# means the document upload path can be exercised locally, which it never
+# could be before.
+enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
